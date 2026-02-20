@@ -236,11 +236,11 @@ def main():
             cols = st.columns(min(len(st.session_state.uploaded_images), 4))
             
             for idx, img_data in enumerate(st.session_state.uploaded_images):
-                with cols[idx]:
+                with cols[idx % 4]:
                     # Отображаем превью
                     st.image(
                         img_data["thumbnail"],
-                        caption=img_data["name"],
+                        caption=img_data["name"][:15] + "..." if len(img_data["name"]) > 15 else img_data["name"],
                         use_column_width=True
                     )
             
@@ -298,6 +298,9 @@ def main():
                             image_url = st.session_state.generator.get_task_result(task_id)
                             
                             if image_url:
+                                # Сохраняем результат
+                                st.session_state.last_result = image_url
+                                
                                 # Отображаем результат
                                 with result_placeholder.container():
                                     st.success("✅ Генерация завершена!")
