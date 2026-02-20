@@ -8,6 +8,7 @@ import time
 from PIL import Image
 from typing import List, Optional
 import hashlib
+import traceback
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -19,41 +20,81 @@ API_URL_GEN = "https://api.defapi.org/api/image/gen"
 API_URL_QUERY = "https://api.defapi.org/api/task/query"
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def process_image_cache(image_bytes: bytes) -> Optional[dict]:
-    """Кэширует обработанные изображения"""
-    try:
-        image = Image.open(io.BytesIO(image_bytes))
-        
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-        
-        # Уменьшаем размер для уменьшения нагрузки на API
-        max_size = 768  # Уменьшил с 1024 до 768
-        if max(image.size) > max_size:
-            ratio = max_size / max(image.size)
-            new_size = tuple(int(dim * ratio) for dim in image.size)
-            image = image.resize(new_size, Image.Resampling.LANCZOS)
-        
-        # Увеличиваем сжатие для уменьшения размера
-        buffer = io.BytesIO()
-        image.save(buffer, format='JPEG', quality=75, optimize=True)  # Уменьшил quality с 85 до 75
-        compressed_bytes = buffer.getvalue()
-        
-        base64_image = base64.b64encode(compressed_bytes).decode('utf-8')
-        image_hash = hashlib.md5(compressed_bytes).hexdigest()[:8]
-        
-        logger.info(f"Изображение обработано: размер base64={len(base64_image)}")
-        
-        return {
-            "data": base64_image,
-            "mime_type": "image/jpeg",
-            "hash": image_hash,
-            "size": len(compressed_bytes)
-        }
-        
-    except Exception as e:
-        logger.error(f"Ошибка при обработке изображения: {e}")
-        return None
+def safe_process_image(image_bytes: bytes) -> Optional[dict]:
+    """Безопасная обработка любого изображения с множественными попытками"""
+    
+    results = []
+    errors = []
+    
+    # Пробуем разные методы обработки
+    methods = [
+        {"name": "Метод 1: Оригинал -> JPEG", "quality": 95, "max_size": None},
+        {"name": "Метод 2: Сжатие 1024px", "quality": 85, "max_size": 1024},
+        {"name": "Метод 3: Сильное сжатие", "quality": 75, "max_size": 768},
+        {"name": "Метод 4: Минимальное", "quality": 65, "max_size": 512},
+    ]
+    
+    for method in methods:
+        try:
+            # Открываем изображение
+            img = Image.open(io.BytesIO(image_bytes))
+            
+            # Конвертируем в RGB если нужно
+            if img.mode in ('RGBA', 'LA', 'P'):
+                # Для прозрачных изображений делаем белый фон
+                if img.mode == 'RGBA':
+                    background = Image.new('RGB', img.size, (255, 255, 255))
+                    background.paste(img, mask=img.split()[3])
+                    img = background
+                else:
+                    img = img.convert('RGB')
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Изменяем размер если нужно
+            if method["max_size"] and max(img.size) > method["max_size"]:
+                ratio = method["max_size"] / max(img.size)
+                new_size = tuple(int(dim * ratio) for dim in img.size)
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+            
+            # Сохраняем с разными параметрами
+            buffer = io.BytesIO()
+            
+            # Пробуем сохранить как JPEG
+            try:
+                img.save(buffer, format='JPEG', quality=method["quality"], optimize=True)
+            except:
+                # Если не получается, пробуем без оптимизации
+                buffer = io.BytesIO()
+                img.save(buffer, format='JPEG', quality=method["quality"])
+            
+            compressed_bytes = buffer.getvalue()
+            
+            # Конвертируем в base64
+            base64_image = base64.b64encode(compressed_bytes).decode('utf-8')
+            
+            # Проверяем размер
+            if len(base64_image) < 5 * 1024 * 1024:  # Меньше 5MB
+                image_hash = hashlib.md5(compressed_bytes).hexdigest()[:8]
+                
+                return {
+                    "data": base64_image,
+                    "mime_type": "image/jpeg",
+                    "hash": image_hash,
+                    "method": method["name"],
+                    "original_size": len(image_bytes),
+                    "processed_size": len(compressed_bytes)
+                }
+            else:
+                errors.append(f"{method['name']}: слишком большой результат ({len(base64_image)/1024/1024:.1f}MB)")
+                
+        except Exception as e:
+            errors.append(f"{method['name']}: {str(e)}")
+            continue
+    
+    # Если ничего не получилось, логируем ошибки
+    logger.error(f"Все методы обработки не удались: {errors}")
+    return None
 
 class ImageGenerator:
     def __init__(self):
@@ -64,98 +105,108 @@ class ImageGenerator:
         }
     
     def generate_multi_image(self, prompt: str, images_data: List[dict]) -> dict:
-        """Генерирует изображение с подробным логированием"""
+        """Генерирует изображение с автоматическим выбором метода"""
         
         if not images_data:
-            return {"error": "Нет изображений для обработки"}
+            return {"error": "Нет изображений"}
         
-        # Подготавливаем изображения
-        processed_images = []
-        for i, img_data in enumerate(images_data):
-            data_url = f"data:{img_data['mime_type']};base64,{img_data['data']}"
-            processed_images.append(data_url)
-            logger.info(f"Изображение {i+1}: длина data URL = {len(data_url)}")
+        # Подготавливаем изображения - пробуем разные форматы
+        results = []
         
-        # Пробуем разные форматы запроса
-        # Вариант 1: images как массив
-        data_v1 = {
-            "model": "google/nano-banana",
-            "prompt": prompt,
-            "images": processed_images
-        }
-        
-        # Вариант 2: с параметрами
-        data_v2 = {
-            "model": "google/nano-banana",
-            "prompt": prompt,
-            "images": processed_images,
-            "parameters": {
-                "negative_prompt": "",
-                "cfg_scale": 7,
-                "steps": 20,
-                "width": 512,  # Уменьшил размер
-                "height": 512,
-                "sampler": "DPM++ 2M Karras"
+        # Формат 1: images как массив с data URL
+        try:
+            processed_images = []
+            for img_data in images_data:
+                data_url = f"data:{img_data['mime_type']};base64,{img_data['data']}"
+                processed_images.append(data_url)
+            
+            data = {
+                "model": "google/nano-banana",
+                "prompt": prompt,
+                "images": processed_images
             }
-        }
+            
+            response = requests.post(
+                API_URL_GEN,
+                headers=self.headers,
+                json=data,
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                results.append({"format": "data_url", "status": response.status_code})
+        except Exception as e:
+            results.append({"format": "data_url", "error": str(e)})
         
-        # Вариант 3: images как объект
-        data_v3 = {
-            "model": "google/nano-banana",
-            "prompt": prompt,
-            "images": {"0": processed_images[0]} if len(processed_images) == 1 else dict(enumerate(processed_images))
-        }
+        # Формат 2: без префикса data:
+        try:
+            processed_images = [img['data'] for img in images_data]
+            
+            data = {
+                "model": "google/nano-banana",
+                "prompt": prompt,
+                "images": processed_images
+            }
+            
+            response = requests.post(
+                API_URL_GEN,
+                headers=self.headers,
+                json=data,
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                results.append({"format": "raw_base64", "status": response.status_code})
+        except Exception as e:
+            results.append({"format": "raw_base64", "error": str(e)})
         
-        # Пробуем каждый вариант
-        for version, data in [("v1", data_v1), ("v2", data_v2), ("v3", data_v3)]:
+        # Формат 3: image_url вместо images
+        if len(images_data) == 1:
             try:
-                logger.info(f"Пробуем вариант {version}")
-                logger.info(f"URL: {API_URL_GEN}")
-                logger.info(f"Headers: { {k: '***' if 'Bearer' in v else v for k, v in self.headers.items()} }")
-                logger.info(f"Data keys: {list(data.keys())}")
+                data = {
+                    "model": "google/nano-banana",
+                    "prompt": prompt,
+                    "image_url": f"data:{images_data[0]['mime_type']};base64,{images_data[0]['data']}"
+                }
                 
                 response = requests.post(
-                    API_URL_GEN, 
-                    headers=self.headers, 
-                    json=data, 
-                    timeout=30
+                    API_URL_GEN,
+                    headers=self.headers,
+                    json=data,
+                    timeout=60
                 )
                 
-                logger.info(f"Статус ответа для {version}: {response.status_code}")
-                
                 if response.status_code == 200:
-                    result = response.json()
-                    logger.info(f"Успешный ответ для {version}")
-                    return result
+                    return response.json()
                 else:
-                    logger.error(f"Ошибка для {version}: {response.status_code}")
-                    logger.error(f"Response text: {response.text[:500]}")
-                    
+                    results.append({"format": "image_url", "status": response.status_code})
             except Exception as e:
-                logger.error(f"Исключение для {version}: {str(e)}")
-                continue
+                results.append({"format": "image_url", "error": str(e)})
         
-        return {"error": "Все варианты запроса не удались"}
+        return {
+            "error": "Все форматы запроса не удались",
+            "details": results
+        }
     
     def get_task_result(self, task_id: str) -> Optional[str]:
         """Получает результат задачи"""
         try:
             url = f"{API_URL_QUERY}?task_id={task_id}"
-            logger.info(f"Проверка статуса задачи: {task_id}")
             
-            max_attempts = 30
-            for attempt in range(max_attempts):
+            for attempt in range(30):
                 time.sleep(2)
                 
                 try:
                     response = requests.get(url, headers=self.headers, timeout=30)
                     
                     if response.status_code != 200:
-                        logger.warning(f"Попытка {attempt+1}: статус {response.status_code}")
                         continue
                     
                     result = response.json()
-                    logger.info(f"Попытка {attempt+1}: {result}")
                     
                     if 'data' in result:
                         data = result['data']
@@ -163,19 +214,18 @@ class ImageGenerator:
                         
                         if status == 'success':
                             if 'result' in data and data['result']:
-                                if isinstance(data['result'], list) and len(data['result']) > 0:
-                                    image_url = data['result'][0].get('image')
-                                    logger.info(f"Получен URL: {image_url}")
-                                    return image_url
+                                if isinstance(data['result'], list):
+                                    return data['result'][0].get('image')
+                                elif isinstance(data['result'], dict):
+                                    return data['result'].get('image')
                             return None
                         
                         elif status in ['failed', 'error']:
-                            logger.error(f"Задача завершилась с ошибкой: {data.get('message')}")
                             return None
                     
-                except Exception as e:
-                    logger.error(f"Ошибка при проверке статуса: {e}")
-                    
+                except Exception:
+                    continue
+            
             return None
             
         except Exception as e:
@@ -187,8 +237,6 @@ def init_session_state():
         st.session_state.generator = ImageGenerator()
     if 'uploaded_images' not in st.session_state:
         st.session_state.uploaded_images = []
-    if 'processed_hashes' not in st.session_state:
-        st.session_state.processed_hashes = set()
     if 'processing' not in st.session_state:
         st.session_state.processing = False
     if 'last_result' not in st.session_state:
@@ -200,7 +248,6 @@ def init_session_state():
 
 def clear_all():
     st.session_state.uploaded_images = []
-    st.session_state.processed_hashes = set()
     st.session_state.last_result = None
     st.session_state.error_message = None
     st.session_state.processing = False
@@ -215,23 +262,31 @@ def main():
     
     init_session_state()
     
-    st.title("🎨 Генератор изображений")
+    st.title("🎨 Универсальный генератор изображений")
     st.markdown("---")
     
-    # Debug секция (только для разработки)
-    with st.expander("🔧 Debug информация", expanded=False):
+    # Debug секция
+    with st.expander("🔧 Информация об изображениях", expanded=False):
+        if st.session_state.uploaded_images:
+            for i, img in enumerate(st.session_state.uploaded_images):
+                st.write(f"**Изображение {i+1}:**")
+                st.write(f"- Метод обработки: {img.get('method', 'N/A')}")
+                st.write(f"- Оригинальный размер: {img.get('original_size', 0)/1024:.1f}KB")
+                st.write(f"- Обработанный размер: {img.get('processed_size', 0)/1024:.1f}KB")
+                st.write(f"- Хеш: {img.get('hash', 'N/A')}")
+        
         if st.session_state.debug_info:
             st.json(st.session_state.debug_info)
-        if st.button("Очистить debug"):
-            st.session_state.debug_info = None
     
     with st.sidebar:
         st.header("ℹ️ Информация")
         st.markdown("""
         **Как это работает:**
-        1. Загрузите до 4 изображений
+        1. Загрузите до 4 изображений (любые форматы)
         2. Напишите промпт
         3. Нажмите "Сгенерировать"
+        
+        **Поддерживаются:** JPG, PNG, GIF, WEBP, BMP
         """)
         
         st.markdown("---")
@@ -254,7 +309,7 @@ def main():
         
         uploaded_files = st.file_uploader(
             "Выберите изображения",
-            type=['png', 'jpg', 'jpeg', 'webp'],
+            type=['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'],
             accept_multiple_files=True,
             key="file_uploader",
             disabled=st.session_state.processing
@@ -265,26 +320,28 @@ def main():
             
             for uploaded_file in uploaded_files:
                 try:
-                    bytes_data = uploaded_file.getvalue()
-                    
-                    if len(bytes_data) > 10 * 1024 * 1024:
-                        st.warning(f"Файл {uploaded_file.name} слишком большой (>10MB)")
-                        continue
-                    
                     if len(st.session_state.uploaded_images) + len(new_images) >= 4:
                         st.warning("Максимум 4 изображения")
                         break
                     
-                    processed = process_image_cache(bytes_data)
+                    bytes_data = uploaded_file.getvalue()
                     
-                    if processed and processed['hash'] not in st.session_state.processed_hashes:
+                    with st.spinner(f"Обработка {uploaded_file.name}..."):
+                        processed = safe_process_image(bytes_data)
+                    
+                    if processed:
                         new_images.append({
                             "data": processed,
                             "name": uploaded_file.name,
                             "thumbnail": bytes_data,
-                            "hash": processed['hash']
+                            "method": processed.get("method", "Unknown"),
+                            "original_size": processed.get("original_size", 0),
+                            "processed_size": processed.get("processed_size", 0),
+                            "hash": processed.get("hash", "")
                         })
-                        st.session_state.processed_hashes.add(processed['hash'])
+                        st.success(f"✅ {uploaded_file.name} - {processed.get('method', 'OK')}")
+                    else:
+                        st.error(f"❌ Не удалось обработать {uploaded_file.name}")
                     
                 except Exception as e:
                     st.error(f"Ошибка при обработке {uploaded_file.name}")
@@ -312,8 +369,7 @@ def main():
             "Опишите желаемый результат:",
             height=100,
             placeholder="Например: Объедините изображения в один коллаж",
-            disabled=st.session_state.processing,
-            key="prompt_input"
+            disabled=st.session_state.processing
         )
         
         can_generate = (
@@ -331,7 +387,6 @@ def main():
         ):
             st.session_state.processing = True
             st.session_state.error_message = None
-            st.session_state.debug_info = None
             
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -342,19 +397,18 @@ def main():
                 
                 images_data = [img["data"] for img in st.session_state.uploaded_images]
                 
-                status_text.text("Отправка запроса к API...")
-                progress_bar.progress(20)
-                
                 # Сохраняем debug информацию
                 st.session_state.debug_info = {
                     "prompt": prompt,
                     "num_images": len(images_data),
-                    "image_sizes": [len(img["data"]) for img in images_data]
+                    "image_methods": [img.get("method", "Unknown") for img in st.session_state.uploaded_images]
                 }
+                
+                status_text.text("Отправка запроса к API...")
+                progress_bar.progress(20)
                 
                 gen_result = st.session_state.generator.generate_multi_image(prompt, images_data)
                 
-                # Обновляем debug информацией с ответом
                 st.session_state.debug_info["response"] = gen_result
                 
                 if gen_result and "error" not in gen_result:
@@ -378,14 +432,16 @@ def main():
                         else:
                             st.session_state.error_message = "Не удалось получить результат"
                     else:
-                        st.session_state.error_message = f"Неверный ответ от API: {gen_result}"
+                        st.session_state.error_message = f"Неверный ответ от API"
                 else:
-                    error_msg = gen_result.get("error", "Неизвестная ошибка") if gen_result else "Ошибка подключения"
+                    error_msg = gen_result.get("error", "Неизвестная ошибка")
+                    details = gen_result.get("details", [])
                     st.session_state.error_message = f"Ошибка: {error_msg}"
+                    st.session_state.debug_info["error_details"] = details
                     
             except Exception as e:
                 st.session_state.error_message = f"Ошибка: {str(e)}"
-                st.session_state.debug_info["exception"] = str(e)
+                st.session_state.debug_info["exception"] = traceback.format_exc()
             
             finally:
                 progress_bar.empty()
