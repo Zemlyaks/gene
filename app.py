@@ -7,18 +7,19 @@ import io
 import time
 from PIL import Image
 from typing import List, Optional
+import uuid
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Конфигурация API - та же что и в Telegram боте
-API_KEY = "dk-13a00e5103d9345a25a6df802988ad47"
+# Конфигурация API
+API_KEY = "dk-13a00e5103d9345a25a6df802988ad47"  # Ваш API ключ
 API_URL_GEN = "https://api.defapi.org/api/image/gen"
 API_URL_QUERY = "https://api.defapi.org/api/task/query"
 
 class ImageGenerator:
-    """Класс для генерации изображений - скопирован из Telegram бота"""
+    """Класс для генерации изображений через API"""
     
     def __init__(self):
         self.headers = {
@@ -27,28 +28,20 @@ class ImageGenerator:
             "Authorization": f"Bearer {API_KEY}",
         }
     
-    def download_and_process_image(self, image_bytes: bytes) -> dict:
-        """Обрабатывает изображение как в Telegram боте"""
+    def process_image(self, image_bytes: bytes) -> Optional[dict]:
+        """Обрабатывает изображение для отправки в API"""
         try:
-            # Пробуем определить тип изображения
-            try:
-                image = Image.open(io.BytesIO(image_bytes))
-                format_str = image.format
-                
-                if format_str == 'JPEG':
-                    mime_type = "image/jpeg"
-                elif format_str == 'PNG':
-                    mime_type = "image/png"
-                elif format_str == 'GIF':
-                    mime_type = "image/gif"
-                elif format_str == 'WEBP':
-                    mime_type = "image/webp"
-                else:
-                    mime_type = "image/jpeg"
-                    
-                image.close()
-            except Exception:
-                mime_type = "image/jpeg"
+            # Определяем тип изображения
+            image = Image.open(io.BytesIO(image_bytes))
+            format_str = image.format
+            
+            mime_types = {
+                'JPEG': "image/jpeg",
+                'PNG': "image/png",
+                'GIF': "image/gif",
+                'WEBP': "image/webp"
+            }
+            mime_type = mime_types.get(format_str, "image/jpeg")
             
             # Конвертируем в base64
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
@@ -63,9 +56,10 @@ class ImageGenerator:
         except Exception as e:
             logger.error(f"Ошибка при обработке изображения: {e}")
             return None
-
+    
     def generate_multi_image(self, prompt: str, images_data: List[dict]) -> dict:
-        """Генерация изображения с несколькими входными изображениями - как в Telegram боте"""
+        """Генерирует изображение на основе промпта и загруженных изображений"""
+        
         # Подготавливаем изображения для API
         processed_images = []
         for img_data in images_data:
@@ -80,8 +74,12 @@ class ImageGenerator:
         try:
             logger.info(f"Отправка multi-image запроса: {prompt} с {len(images_data)} изображениями")
             
-            response = requests.post(API_URL_GEN, headers=self.headers, json=data, timeout=60)
-            logger.info(f"Response status: {response.status_code}")
+            response = requests.post(
+                API_URL_GEN, 
+                headers=self.headers, 
+                json=data, 
+                timeout=60
+            )
             
             if response.status_code != 200:
                 logger.error(f"HTTP Error: {response.status_code}, Response: {response.text}")
@@ -100,97 +98,118 @@ class ImageGenerator:
         except Exception as e:
             logger.error(f"Неожиданная ошибка: {e}")
             return {"error": str(e)}
-
-    def get_task_result(self, task_id: str) -> dict:
-        """Получение результата задачи - как в Telegram боте"""
+    
+    def get_task_result(self, task_id: str, max_attempts: int = 30, wait_time: int = 3) -> Optional[dict]:
+        """Получает результат задачи по task_id"""
         try:
             url = f"{API_URL_QUERY}?task_id={task_id}"
-            logger.info(f"Запрос статуса задачи: {task_id}")
-            response = requests.get(url, headers=self.headers, timeout=30)
-            response.raise_for_status()
-            result = response.json()
-            return result
-        except requests.exceptions.RequestException as e:
+            
+            for attempt in range(max_attempts):
+                time.sleep(wait_time)
+                
+                response = requests.get(url, headers=self.headers, timeout=30)
+                
+                if response.status_code != 200:
+                    continue
+                
+                result = response.json()
+                
+                if 'data' in result:
+                    data = result['data']
+                    status = data.get('status')
+                    
+                    if status == 'success' and 'result' in data and data['result']:
+                        if isinstance(data['result'], list) and len(data['result']) > 0:
+                            return data['result'][0].get('image')
+                        elif isinstance(data['result'], dict):
+                            return data['result'].get('image')
+                    
+                    elif status in ['failed', 'error']:
+                        return None
+                
+                if attempt == max_attempts - 1:
+                    return None
+                    
+        except Exception as e:
             logger.error(f"Ошибка при получении результата: {e}")
             return None
 
-def init_session_state():
-    if 'generator' not in st.session_state:
-        st.session_state.generator = ImageGenerator()
-    if 'uploaded_images' not in st.session_state:
-        st.session_state.uploaded_images = []
-    if 'processing' not in st.session_state:
-        st.session_state.processing = False
-    if 'last_result' not in st.session_state:
-        st.session_state.last_result = None
-    if 'error_message' not in st.session_state:
-        st.session_state.error_message = None
-
-def clear_all():
-    st.session_state.uploaded_images = []
-    st.session_state.last_result = None
-    st.session_state.error_message = None
-    st.session_state.processing = False
-
 def main():
+    """Основная функция Streamlit приложения"""
+    
+    # Настройка страницы
     st.set_page_config(
         page_title="Генератор изображений",
         page_icon="🎨",
         layout="wide"
     )
     
-    init_session_state()
-    
-    st.title("🎨 Генератор изображений")
+    # Заголовок
+    st.title("🎨 Генератор изображений из изображений")
     st.markdown("---")
     
+    # Инициализация генератора в session state
+    if 'generator' not in st.session_state:
+        st.session_state.generator = ImageGenerator()
+    
+    if 'uploaded_images' not in st.session_state:
+        st.session_state.uploaded_images = []
+    
+    if 'processing' not in st.session_state:
+        st.session_state.processing = False
+    
+    # Боковая панель с информацией
     with st.sidebar:
         st.header("ℹ️ Информация")
         st.markdown("""
         **Как это работает:**
         1. Загрузите до 4 изображений
-        2. Напишите промпт
+        2. Напишите промпт (описание желаемого результата)
         3. Нажмите "Сгенерировать"
         4. Подождите 30-60 секунд
+        
+        **Примеры промптов:**
+        - "Объедините эти изображения в коллаж"
+        - "Создайте новое изображение на основе этих картинок"
+        - "Поместите все объекты на один фон"
         """)
         
         st.markdown("---")
-        st.markdown(f"**Загружено:** {len(st.session_state.uploaded_images)}/4")
-        
-        if st.button("🗑️ Очистить всё", use_container_width=True):
-            clear_all()
-            st.rerun()
+        st.markdown("**Статус:**")
+        st.info(f"Загружено изображений: {len(st.session_state.uploaded_images)}/4")
     
-    if st.session_state.error_message:
-        st.error(st.session_state.error_message)
-        if st.button("Очистить ошибку"):
-            st.session_state.error_message = None
-            st.rerun()
-    
+    # Основная область
     col1, col2 = st.columns(2)
     
     with col1:
         st.subheader("📤 Загрузка изображений")
         
+        # Загрузка файлов
         uploaded_files = st.file_uploader(
-            "Выберите изображения",
+            "Выберите изображения (до 4 шт.)",
             type=['png', 'jpg', 'jpeg', 'gif', 'webp'],
             accept_multiple_files=True,
-            key="file_uploader",
-            disabled=st.session_state.processing
+            key="file_uploader"
         )
         
+        # Обработка загруженных файлов
         if uploaded_files and not st.session_state.processing:
-            for uploaded_file in uploaded_files:
+            # Ограничиваем количество файлов
+            if len(uploaded_files) > 4:
+                st.warning("Можно загрузить не более 4 изображений. Первые 4 будут использованы.")
+                uploaded_files = uploaded_files[:4]
+            
+            # Обрабатываем каждый файл
+            st.session_state.uploaded_images = []
+            progress_bar = st.progress(0)
+            
+            for i, uploaded_file in enumerate(uploaded_files):
                 try:
-                    if len(st.session_state.uploaded_images) >= 4:
-                        st.warning("Максимум 4 изображения")
-                        break
-                    
+                    # Читаем файл
                     bytes_data = uploaded_file.getvalue()
                     
-                    # Обрабатываем как в Telegram боте
-                    processed = st.session_state.generator.download_and_process_image(bytes_data)
+                    # Обрабатываем изображение
+                    processed = st.session_state.generator.process_image(bytes_data)
                     
                     if processed:
                         st.session_state.uploaded_images.append({
@@ -198,131 +217,113 @@ def main():
                             "name": uploaded_file.name,
                             "thumbnail": bytes_data
                         })
-                        st.success(f"✅ {uploaded_file.name}")
+                    
+                    progress_bar.progress((i + 1) / len(uploaded_files))
                     
                 except Exception as e:
-                    st.error(f"Ошибка при обработке {uploaded_file.name}")
+                    st.error(f"Ошибка при обработке {uploaded_file.name}: {str(e)}")
+            
+            progress_bar.empty()
             
             if st.session_state.uploaded_images:
-                st.rerun()
+                st.success(f"✅ Загружено {len(st.session_state.uploaded_images)} изображений")
         
+        # Отображение загруженных изображений
         if st.session_state.uploaded_images:
-            st.subheader("🖼️ Загруженные")
+            st.subheader("🖼️ Загруженные изображения")
+            
+            # Создаем сетку для превью
             cols = st.columns(min(len(st.session_state.uploaded_images), 4))
             
             for idx, img_data in enumerate(st.session_state.uploaded_images):
-                with cols[idx % 4]:
+                with cols[idx]:
+                    # Отображаем превью
                     st.image(
                         img_data["thumbnail"],
-                        caption=f"{idx+1}. {img_data['name'][:10]}...",
+                        caption=img_data["name"],
                         use_column_width=True
                     )
+            
+            # Кнопка очистки
+            if st.button("🗑️ Очистить все изображения", disabled=st.session_state.processing):
+                st.session_state.uploaded_images = []
+                st.rerun()
     
     with col2:
         st.subheader("📝 Промпт и генерация")
         
+        # Поле для ввода промпта
         prompt = st.text_area(
-            "Опишите желаемый результат:",
+            "Введите описание желаемого результата:",
             height=100,
-            placeholder="Например: Объедините изображения в один коллаж",
-            disabled=st.session_state.processing
+            placeholder="Например: Объедините все изображения в один коллаж на фоне заката...",
+            disabled=st.session_state.processing or len(st.session_state.uploaded_images) == 0
         )
         
-        can_generate = (
-            not st.session_state.processing and 
-            len(st.session_state.uploaded_images) > 0 and 
-            prompt and 
-            len(prompt.strip()) >= 3
-        )
-        
-        if st.button(
+        # Кнопка генерации
+        generate_button = st.button(
             "🚀 Сгенерировать",
             type="primary",
             use_container_width=True,
-            disabled=not can_generate
-        ):
+            disabled=(
+                st.session_state.processing or 
+                len(st.session_state.uploaded_images) == 0 or 
+                not prompt or 
+                len(prompt.strip()) < 3
+            )
+        )
+        
+        # Область для результата
+        result_placeholder = st.empty()
+        
+        # Обработка генерации
+        if generate_button:
             st.session_state.processing = True
-            st.session_state.error_message = None
-            
-            progress_bar = st.progress(0)
-            status_text = st.empty()
             
             try:
-                status_text.text("Подготовка данных...")
-                progress_bar.progress(10)
-                
+                # Подготавливаем данные для API
                 images_data = [img["data"] for img in st.session_state.uploaded_images]
                 
-                status_text.text("Отправка запроса к API...")
-                progress_bar.progress(20)
-                
-                # Используем тот же метод что и в Telegram боте
-                gen_result = st.session_state.generator.generate_multi_image(prompt, images_data)
-                
-                if gen_result and "error" not in gen_result:
-                    if 'data' in gen_result and 'task_id' in gen_result['data']:
-                        task_id = gen_result['data']['task_id']
-                        
-                        status_text.text("Ожидание результата...")
-                        
-                        # Ждем результат как в Telegram боте
-                        max_attempts = 30
-                        wait_time = 3
-                        
-                        for attempt in range(max_attempts):
-                            time.sleep(wait_time)
-                            progress_bar.progress(20 + (attempt * 2))
-                            
-                            task_result = st.session_state.generator.get_task_result(task_id)
-                            
-                            if task_result and 'data' in task_result:
-                                data = task_result['data']
-                                status = data.get('status')
-                                
-                                if status == 'success' and 'result' in data and data['result']:
-                                    if isinstance(data['result'], list) and len(data['result']) > 0:
-                                        image_url = data['result'][0].get('image')
-                                    else:
-                                        image_url = data['result'].get('image')
-                                    
-                                    if image_url:
-                                        st.session_state.last_result = image_url
-                                        status_text.text("Готово!")
-                                        progress_bar.progress(100)
-                                        break
-                                
-                                elif status in ['failed', 'error']:
-                                    st.session_state.error_message = "Ошибка при генерации"
-                                    break
-                            
-                            if attempt == max_attempts - 1:
-                                st.session_state.error_message = "Превышено время ожидания"
-                    else:
-                        st.session_state.error_message = "Неверный ответ от API"
-                else:
-                    error_msg = gen_result.get("error", "Неизвестная ошибка") if gen_result else "Ошибка подключения"
-                    st.session_state.error_message = f"Ошибка: {error_msg}"
+                # Показываем прогресс
+                with st.spinner("🔄 Генерация изображения... Это может занять 30-60 секунд"):
                     
+                    # Отправляем запрос на генерацию
+                    gen_result = st.session_state.generator.generate_multi_image(prompt, images_data)
+                    
+                    if gen_result and "error" not in gen_result:
+                        if 'data' in gen_result and 'task_id' in gen_result['data']:
+                            task_id = gen_result['data']['task_id']
+                            
+                            # Получаем результат
+                            image_url = st.session_state.generator.get_task_result(task_id)
+                            
+                            if image_url:
+                                # Отображаем результат
+                                with result_placeholder.container():
+                                    st.success("✅ Генерация завершена!")
+                                    st.image(image_url, caption="Результат", use_column_width=True)
+                                    
+                                    # Кнопка для скачивания
+                                    st.markdown(f"[📥 Скачать изображение]({image_url})")
+                            else:
+                                st.error("❌ Не удалось получить результат генерации")
+                        else:
+                            st.error(f"❌ Ошибка API: {gen_result}")
+                    else:
+                        error_msg = gen_result.get("error", "Неизвестная ошибка") if gen_result else "Ошибка подключения"
+                        st.error(f"❌ Ошибка при генерации: {error_msg}")
+                
             except Exception as e:
-                st.session_state.error_message = f"Ошибка: {str(e)}"
+                st.error(f"❌ Произошла ошибка: {str(e)}")
+                logger.error(f"Ошибка генерации: {e}", exc_info=True)
             
             finally:
-                progress_bar.empty()
-                status_text.empty()
                 st.session_state.processing = False
-                st.rerun()
         
-        if st.session_state.last_result:
-            st.subheader("🎨 Результат")
-            st.image(st.session_state.last_result, use_column_width=True)
-            
-            col_a, col_b = st.columns(2)
-            with col_a:
-                if st.button("🔄 Новый запрос", use_container_width=True):
-                    st.session_state.last_result = None
-                    st.rerun()
-            with col_b:
-                st.markdown(f"[📥 Скачать]({st.session_state.last_result})")
+        # Если не в процессе генерации, показываем последний результат (если есть)
+        elif not st.session_state.processing and 'last_result' in st.session_state:
+            with result_placeholder.container():
+                st.image(st.session_state.last_result, caption="Последний результат", use_column_width=True)
 
 if __name__ == "__main__":
     main()
