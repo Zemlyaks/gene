@@ -8,6 +8,7 @@ import time
 from PIL import Image
 from typing import List, Optional
 import uuid
+import os
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -17,6 +18,10 @@ logger = logging.getLogger(__name__)
 API_KEY = "dk-13a00e5103d9345a25a6df802988ad47"  # Ваш API ключ
 API_URL_GEN = "https://api.defapi.org/api/image/gen"
 API_URL_QUERY = "https://api.defapi.org/api/task/query"
+
+# Создаем папку для сохранения изображений
+IMAGES_FOLDER = "generated_images"
+os.makedirs(IMAGES_FOLDER, exist_ok=True)
 
 class ImageGenerator:
     """Класс для генерации изображений через API"""
@@ -99,7 +104,7 @@ class ImageGenerator:
             logger.error(f"Неожиданная ошибка: {e}")
             return {"error": str(e)}
     
-    def get_task_result(self, task_id: str, max_attempts: int = 30, wait_time: int = 3) -> Optional[dict]:
+    def get_task_result(self, task_id: str, max_attempts: int = 30, wait_time: int = 3) -> Optional[str]:
         """Получает результат задачи по task_id"""
         try:
             url = f"{API_URL_QUERY}?task_id={task_id}"
@@ -133,6 +138,31 @@ class ImageGenerator:
         except Exception as e:
             logger.error(f"Ошибка при получении результата: {e}")
             return None
+    
+    def download_and_save_image(self, image_url: str) -> Optional[str]:
+        """Скачивает изображение по URL и сохраняет локально"""
+        try:
+            # Скачиваем изображение
+            response = requests.get(image_url, timeout=30)
+            
+            if response.status_code != 200:
+                logger.error(f"Не удалось скачать изображение: {response.status_code}")
+                return None
+            
+            # Генерируем уникальное имя файла
+            filename = f"{uuid.uuid4()}.jpg"
+            filepath = os.path.join(IMAGES_FOLDER, filename)
+            
+            # Сохраняем изображение
+            with open(filepath, 'wb') as f:
+                f.write(response.content)
+            
+            logger.info(f"Изображение сохранено: {filepath}")
+            return filepath
+            
+        except Exception as e:
+            logger.error(f"Ошибка при скачивании изображения: {e}")
+            return None
 
 def main():
     """Основная функция Streamlit приложения"""
@@ -158,6 +188,12 @@ def main():
     if 'processing' not in st.session_state:
         st.session_state.processing = False
     
+    if 'last_result' not in st.session_state:
+        st.session_state.last_result = None
+    
+    if 'last_result_path' not in st.session_state:
+        st.session_state.last_result_path = None
+    
     # Боковая панель с информацией
     with st.sidebar:
         st.header("ℹ️ Информация")
@@ -177,6 +213,18 @@ def main():
         st.markdown("---")
         st.markdown("**Статус:**")
         st.info(f"Загружено изображений: {len(st.session_state.uploaded_images)}/4")
+        
+        # Кнопка очистки старых изображений
+        if st.button("🗑️ Очистить кэш изображений", use_container_width=True):
+            try:
+                # Удаляем все файлы в папке images
+                for filename in os.listdir(IMAGES_FOLDER):
+                    filepath = os.path.join(IMAGES_FOLDER, filename)
+                    if os.path.isfile(filepath):
+                        os.remove(filepath)
+                st.success("✅ Кэш очищен")
+            except Exception as e:
+                st.error(f"Ошибка при очистке: {e}")
     
     # Основная область
     col1, col2 = st.columns(2)
@@ -189,7 +237,8 @@ def main():
             "Выберите изображения (до 4 шт.)",
             type=['png', 'jpg', 'jpeg', 'gif', 'webp'],
             accept_multiple_files=True,
-            key="file_uploader"
+            key="file_uploader",
+            disabled=st.session_state.processing
         )
         
         # Обработка загруженных файлов
@@ -236,11 +285,11 @@ def main():
             cols = st.columns(min(len(st.session_state.uploaded_images), 4))
             
             for idx, img_data in enumerate(st.session_state.uploaded_images):
-                with cols[idx]:
+                with cols[idx % 4]:
                     # Отображаем превью
                     st.image(
                         img_data["thumbnail"],
-                        caption=img_data["name"],
+                        caption=img_data["name"][:15] + "..." if len(img_data["name"]) > 15 else img_data["name"],
                         use_column_width=True
                     )
             
@@ -294,17 +343,31 @@ def main():
                         if 'data' in gen_result and 'task_id' in gen_result['data']:
                             task_id = gen_result['data']['task_id']
                             
-                            # Получаем результат
+                            # Получаем URL изображения
                             image_url = st.session_state.generator.get_task_result(task_id)
                             
                             if image_url:
-                                # Отображаем результат
-                                with result_placeholder.container():
-                                    st.success("✅ Генерация завершена!")
-                                    st.image(image_url, caption="Результат", use_column_width=True)
+                                # Скачиваем и сохраняем изображение локально
+                                local_path = st.session_state.generator.download_and_save_image(image_url)
+                                
+                                if local_path:
+                                    st.session_state.last_result_path = local_path
                                     
-                                    # Кнопка для скачивания
-                                    st.markdown(f"[📥 Скачать изображение]({image_url})")
+                                    # Отображаем результат из локального файла
+                                    with result_placeholder.container():
+                                        st.success("✅ Генерация завершена!")
+                                        st.image(local_path, caption="Результат", use_column_width=True)
+                                        
+                                        # Кнопка для скачивания
+                                        with open(local_path, "rb") as file:
+                                            btn = st.download_button(
+                                                label="📥 Скачать изображение",
+                                                data=file,
+                                                file_name=f"generated_{uuid.uuid4()}.jpg",
+                                                mime="image/jpeg"
+                                            )
+                                else:
+                                    st.error("❌ Не удалось сохранить изображение локально")
                             else:
                                 st.error("❌ Не удалось получить результат генерации")
                         else:
@@ -319,11 +382,22 @@ def main():
             
             finally:
                 st.session_state.processing = False
+                st.rerun()
         
         # Если не в процессе генерации, показываем последний результат (если есть)
-        elif not st.session_state.processing and 'last_result' in st.session_state:
-            with result_placeholder.container():
-                st.image(st.session_state.last_result, caption="Последний результат", use_column_width=True)
+        elif not st.session_state.processing and st.session_state.last_result_path:
+            if os.path.exists(st.session_state.last_result_path):
+                with result_placeholder.container():
+                    st.subheader("🎨 Последний результат")
+                    st.image(st.session_state.last_result_path, caption="Результат", use_column_width=True)
+                    
+                    with open(st.session_state.last_result_path, "rb") as file:
+                        btn = st.download_button(
+                            label="📥 Скачать изображение",
+                            data=file,
+                            file_name=f"generated_{uuid.uuid4()}.jpg",
+                            mime="image/jpeg"
+                        )
 
 if __name__ == "__main__":
     main()
