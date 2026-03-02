@@ -71,7 +71,7 @@ class ImageGenerator:
             processed_images.append(f"data:{img_data['mime_type']};base64,{img_data['data']}")
         
         data = {
-            "model": "google/nano-banana",
+            "model": "google/nano-banana-pro",
             "prompt": prompt,
             "images": processed_images
         }
@@ -401,3 +401,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
