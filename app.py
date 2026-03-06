@@ -14,17 +14,104 @@ import os
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Конфигурация API
-API_KEY = "dk-13a00e5103d9345a25a6df802988ad47"  # Ваш API ключ
-API_URL_GEN = "https://api.defapi.org/api/image/gen"
-API_URL_QUERY = "https://api.defapi.org/api/task/query"
+# Конфигурация API Yes Ai
+API_KEY = "yes-b091ffe8d0f341ba9b4dbf18092c0c919a16a3e117d2c9b311dbd24fc122"
+API_URL_GEN_IMAGE = "https://api.yesai.su/v2/google/nanobanana/generations"
+API_URL_QUERY_IMAGE = "https://api.yesai.su/v2/google/nanobanana/generations/"
+
+# Конфигурация Freeimage.host
+FREEIMAGE_API_KEY = "6d207e02198a847aa98d0a2a901485a5"
+FREEIMAGE_API_URL = "https://freeimage.host/api/1/upload"
 
 # Создаем папку для сохранения изображений
 IMAGES_FOLDER = "generated_images"
 os.makedirs(IMAGES_FOLDER, exist_ok=True)
 
+class FreeImageUploader:
+    """Класс для загрузки изображений на Freeimage.host"""
+    
+    def __init__(self):
+        self.api_key = FREEIMAGE_API_KEY
+        self.api_url = FREEIMAGE_API_URL
+    
+    def upload_image(self, image_bytes: bytes, filename: str = None) -> Optional[str]:
+        """
+        Загружает изображение на Freeimage.host и возвращает прямую ссылку
+        """
+        try:
+            if not filename:
+                filename = f"image_{uuid.uuid4().hex[:8]}.jpg"
+            
+            # Кодируем изображение в base64
+            base64_image = base64.b64encode(image_bytes).decode('utf-8')
+            
+            # Создаем данные для POST запроса
+            data = {
+                'key': self.api_key,
+                'action': 'upload',
+                'source': base64_image,
+                'format': 'json'
+            }
+            
+            logger.info(f"Отправка изображения на Freeimage.host...")
+            
+            response = requests.post(self.api_url, data=data, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                # Проверяем статус ответа
+                if result.get('status_code') == 200 and result.get('success', {}).get('code') == 200:
+                    # Получаем прямую ссылку на изображение
+                    image_url = result['image']['url']
+                    logger.info(f"Изображение успешно загружено на Freeimage.host: {image_url}")
+                    return image_url
+                else:
+                    error_msg = result.get('status_txt', 'Unknown error')
+                    logger.error(f"Ошибка Freeimage.host API: {error_msg}")
+                    return None
+            else:
+                error_text = response.text
+                logger.error(f"Ошибка HTTP при загрузке на Freeimage.host: {response.status}, {error_text}")
+                return None
+                
+        except requests.exceptions.Timeout:
+            logger.error("Таймаут при загрузке на Freeimage.host")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Ошибка подключения к Freeimage.host: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при загрузке на Freeimage.host: {e}")
+            return None
+    
+    def verify_image_url(self, url: str) -> bool:
+        """Проверяет доступность URL изображения"""
+        try:
+            response = requests.head(url, timeout=5, allow_redirects=True)
+            if response.status_code == 200:
+                content_type = response.headers.get('Content-Type', '')
+                if content_type.startswith('image/'):
+                    logger.info(f"URL {url} доступен и является изображением")
+                    return True
+                else:
+                    logger.warning(f"URL {url} не является изображением: {content_type}")
+            else:
+                logger.warning(f"URL {url} недоступен: {response.status}")
+        except Exception as e:
+            logger.warning(f"Ошибка при проверке URL {url}: {e}")
+        return False
+    
+    def verify_image_urls(self, urls: List[str]) -> List[str]:
+        """Проверяет доступность нескольких URL изображений"""
+        valid_urls = []
+        for url in urls:
+            if self.verify_image_url(url):
+                valid_urls.append(url)
+        return valid_urls
+
 class ImageGenerator:
-    """Класс для генерации изображений через API"""
+    """Класс для генерации изображений через API Yes Ai"""
     
     def __init__(self):
         self.headers = {
@@ -32,6 +119,7 @@ class ImageGenerator:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {API_KEY}",
         }
+        self.image_uploader = FreeImageUploader()
     
     def process_image(self, image_bytes: bytes) -> Optional[dict]:
         """Обрабатывает изображение для отправки в API"""
@@ -55,59 +143,140 @@ class ImageGenerator:
             
             return {
                 "data": base64_image,
-                "mime_type": mime_type
+                "mime_type": mime_type,
+                "image_bytes": image_bytes
             }
             
         except Exception as e:
             logger.error(f"Ошибка при обработке изображения: {e}")
             return None
     
-    def generate_multi_image(self, prompt: str, images_data: List[dict]) -> dict:
-        """Генерирует изображение на основе промпта и загруженных изображений"""
-        
-        # Подготавливаем изображения для API
-        processed_images = []
-        for img_data in images_data:
-            processed_images.append(f"data:{img_data['mime_type']};base64,{img_data['data']}")
-        
+    def upload_to_freeimage(self, image_bytes: bytes, filename: str = None) -> Optional[str]:
+        """Загружает изображение на Freeimage.host"""
+        return self.image_uploader.upload_image(image_bytes, filename)
+    
+    def generate_image(self, prompt: str, customer_id: str) -> dict:
+        """Генерация изображения по промпту"""
         data = {
-            "model": "google/nano-banana-pro",
+            "version": "v.2",
             "prompt": prompt,
-            "images": processed_images
+            "style": "0",
+            "dimensions": "16:9",
+            "customer_id": customer_id
         }
         
+        logger.info(f"Генерация изображения для customer_id: {customer_id}, prompt: {prompt[:50]}...")
+        
         try:
-            logger.info(f"Отправка multi-image запроса: {prompt} с {len(images_data)} изображениями")
-            
             response = requests.post(
-                API_URL_GEN, 
-                headers=self.headers, 
-                json=data, 
+                API_URL_GEN_IMAGE,
+                headers=self.headers,
+                json=data,
                 timeout=60
             )
             
             if response.status_code != 200:
-                logger.error(f"HTTP Error: {response.status_code}, Response: {response.text}")
-                return {"error": f"HTTP {response.status_code}: {response.text}"}
+                error_text = response.text
+                logger.error(f"HTTP Error: {response.status}, Response: {error_text}")
+                
+                if "CUSTOMER_ID_IS_EMPTY" in error_text:
+                    return {"error": "CUSTOMER_ID_IS_EMPTY", "message": "Не указан ID клиента"}
+                elif "CUSTOMER_ID_NOT_VALID" in error_text:
+                    return {"error": "CUSTOMER_ID_NOT_VALID", "message": "Неверный формат ID клиента"}
+                elif "PROMPT_IS_EMPTY" in error_text:
+                    return {"error": "PROMPT_IS_EMPTY", "message": "Промпт не может быть пустым"}
+                elif "PROMPT_NSFW_WORDS" in error_text:
+                    return {"error": "PROMPT_NSFW_WORDS", "message": "Обнаружены запрещенные слова"}
+                
+                return {"error": f"HTTP {response.status}", "message": error_text}
             
             result = response.json()
-            logger.info(f"Ответ multi-image генерации: {result}")
+            logger.info(f"Успешный ответ от API: {result}")
+            return result
+            
+        except requests.exceptions.Timeout:
+            logger.error("Таймаут при генерации изображения")
+            return {"error": "timeout", "message": "Превышено время ожидания"}
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Ошибка подключения: {e}")
+            return {"error": "connection_error", "message": str(e)}
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка: {e}")
+            return {"error": "unexpected_error", "message": str(e)}
+    
+    def generate_multi_image(self, prompt: str, references_urls: List[str], customer_id: str) -> dict:
+        """
+        Генерация изображения с несколькими референсами
+        Поддерживается до 10 изображений
+        """
+        
+        # Ограничиваем количество референсов (максимум 10)
+        if len(references_urls) > 10:
+            logger.warning(f"Слишком много референсов: {len(references_urls)}, обрезаем до 10")
+            references_urls = references_urls[:10]
+        
+        # Проверяем доступность URL
+        logger.info(f"Проверка {len(references_urls)} URL изображений...")
+        valid_urls = self.image_uploader.verify_image_urls(references_urls)
+        
+        if not valid_urls:
+            logger.error("Нет доступных URL изображений")
+            return {"error": "no_valid_images", "message": "Ни одно из изображений недоступно"}
+        
+        if len(valid_urls) < len(references_urls):
+            logger.warning(f"Доступно только {len(valid_urls)} из {len(references_urls)} изображений")
+        
+        # Формируем запрос
+        data = {
+            "version": "v.2",
+            "prompt": prompt,
+            "style": "0",
+            "dimensions": "16:9",
+            "customer_id": customer_id,
+            "references_urls": valid_urls
+        }
+        
+        logger.info(f"Multi-image генерация для customer_id: {customer_id}, референсов: {len(valid_urls)}")
+        
+        try:
+            response = requests.post(
+                API_URL_GEN_IMAGE,
+                headers=self.headers,
+                json=data,
+                timeout=60
+            )
+            
+            if response.status_code != 200:
+                error_text = response.text
+                logger.error(f"HTTP Error: {response.status}, Response: {error_text}")
+                
+                if "CUSTOMER_ID_IS_EMPTY" in error_text:
+                    return {"error": "CUSTOMER_ID_IS_EMPTY", "message": "Не указан ID клиента"}
+                elif "REFERENCES_URLS_NOT_VALID" in error_text:
+                    return {"error": "REFERENCES_URLS_NOT_VALID", "message": "Неверные URL референсов"}
+                elif "REFERENCES_URLS_IS_EMPTY" in error_text:
+                    return {"error": "REFERENCES_URLS_IS_EMPTY", "message": "Не указаны референсы"}
+                
+                return {"error": f"HTTP {response.status}", "message": error_text}
+            
+            result = response.json()
+            logger.info(f"Успешный ответ multi-image API: {result}")
             return result
             
         except requests.exceptions.Timeout:
             logger.error("Таймаут при multi-image генерации")
-            return {"error": "timeout"}
+            return {"error": "timeout", "message": "Превышено время ожидания"}
         except requests.exceptions.RequestException as e:
-            logger.error(f"Ошибка при multi-image генерации: {e}")
-            return {"error": str(e)}
+            logger.error(f"Ошибка подключения: {e}")
+            return {"error": "connection_error", "message": str(e)}
         except Exception as e:
             logger.error(f"Неожиданная ошибка: {e}")
-            return {"error": str(e)}
+            return {"error": "unexpected_error", "message": str(e)}
     
-    def get_task_result(self, task_id: str, max_attempts: int = 30, wait_time: int = 3) -> Optional[str]:
+    def get_task_result(self, task_id: str, max_attempts: int = 30, wait_time: int = 5) -> Optional[dict]:
         """Получает результат задачи по task_id"""
         try:
-            url = f"{API_URL_QUERY}?task_id={task_id}"
+            url = f"{API_URL_QUERY_IMAGE}{task_id}"
             
             for attempt in range(max_attempts):
                 time.sleep(wait_time)
@@ -115,29 +284,48 @@ class ImageGenerator:
                 response = requests.get(url, headers=self.headers, timeout=30)
                 
                 if response.status_code != 200:
+                    logger.warning(f"Попытка {attempt + 1}: статус {response.status_code}")
                     continue
                 
                 result = response.json()
                 
-                if 'data' in result:
-                    data = result['data']
+                if 'results' in result and 'generation_data' in result['results']:
+                    data = result['results']['generation_data']
                     status = data.get('status')
                     
-                    if status == 'success' and 'result' in data and data['result']:
-                        if isinstance(data['result'], list) and len(data['result']) > 0:
-                            return data['result'][0].get('image')
-                        elif isinstance(data['result'], dict):
-                            return data['result'].get('image')
+                    logger.info(f"Попытка {attempt + 1}: статус {status}")
                     
-                    elif status in ['failed', 'error']:
-                        return None
+                    if status == 2 and 'result_url' in data and data['result_url']:
+                        return {
+                            "status": "success",
+                            "image_url": data['result_url']
+                        }
+                    
+                    elif status == 3:
+                        error_msg = data.get('comment_ru') or data.get('comment_en') or "Ошибка генерации"
+                        return {
+                            "status": "failed",
+                            "error": error_msg
+                        }
+                    
+                    elif status == 4:
+                        return {
+                            "status": "timeout",
+                            "error": "Превышено время ожидания"
+                        }
                 
                 if attempt == max_attempts - 1:
-                    return None
+                    return {
+                        "status": "timeout",
+                        "error": "Превышено максимальное количество попыток"
+                    }
                     
         except Exception as e:
             logger.error(f"Ошибка при получении результата: {e}")
-            return None
+            return {
+                "status": "error",
+                "error": str(e)
+            }
     
     def download_and_save_image(self, image_url: str) -> Optional[str]:
         """Скачивает изображение по URL и сохраняет локально"""
@@ -169,13 +357,13 @@ def main():
     
     # Настройка страницы
     st.set_page_config(
-        page_title="Генератор изображений",
+        page_title="Генератор изображений Yes Ai",
         page_icon="🎨",
         layout="wide"
     )
     
     # Заголовок
-    st.title("🎨 Генератор изображений из изображений")
+    st.title("🎨 Генератор изображений на базе Yes Ai")
     st.markdown("---")
     
     # Инициализация генератора в session state
@@ -194,25 +382,40 @@ def main():
     if 'last_result_path' not in st.session_state:
         st.session_state.last_result_path = None
     
+    if 'task_id' not in st.session_state:
+        st.session_state.task_id = None
+    
+    if 'customer_id' not in st.session_state:
+        st.session_state.customer_id = str(uuid.uuid4())[:8]
+    
     # Боковая панель с информацией
     with st.sidebar:
         st.header("ℹ️ Информация")
-        st.markdown("""
+        st.markdown(f"""
+        **ID клиента:** `{st.session_state.customer_id}`
+        
         **Как это работает:**
-        1. Загрузите до 4 изображений
+        1. Загрузите до 10 изображений
         2. Напишите промпт (описание желаемого результата)
         3. Нажмите "Сгенерировать"
         4. Подождите 30-60 секунд
+        
+        **Особенности:**
+        • Изображения загружаются на Freeimage.host
+        • До 10 референсных изображений
+        • Нейросеть Nano Banana 2
+        • Формат: 16:9
         
         **Примеры промптов:**
         - "Объедините эти изображения в коллаж"
         - "Создайте новое изображение на основе этих картинок"
         - "Поместите все объекты на один фон"
+        - "Смешайте стили этих изображений"
         """)
         
         st.markdown("---")
         st.markdown("**Статус:**")
-        st.info(f"Загружено изображений: {len(st.session_state.uploaded_images)}/4")
+        st.info(f"📎 Загружено изображений: {len(st.session_state.uploaded_images)}/10")
         
         # Кнопка очистки старых изображений
         if st.button("🗑️ Очистить кэш изображений", use_container_width=True):
@@ -225,16 +428,21 @@ def main():
                 st.success("✅ Кэш очищен")
             except Exception as e:
                 st.error(f"Ошибка при очистке: {e}")
+        
+        # Кнопка сброса ID клиента
+        if st.button("🔄 Новый ID клиента", use_container_width=True):
+            st.session_state.customer_id = str(uuid.uuid4())[:8]
+            st.rerun()
     
     # Основная область
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("📤 Загрузка изображений")
+        st.subheader("📤 Загрузка изображений (до 10 шт.)")
         
         # Загрузка файлов
         uploaded_files = st.file_uploader(
-            "Выберите изображения (до 4 шт.)",
+            "Выберите изображения",
             type=['png', 'jpg', 'jpeg', 'gif', 'webp'],
             accept_multiple_files=True,
             key="file_uploader",
@@ -244,28 +452,52 @@ def main():
         # Обработка загруженных файлов
         if uploaded_files and not st.session_state.processing:
             # Ограничиваем количество файлов
-            if len(uploaded_files) > 4:
-                st.warning("Можно загрузить не более 4 изображений. Первые 4 будут использованы.")
-                uploaded_files = uploaded_files[:4]
+            if len(uploaded_files) > 10:
+                st.warning("Можно загрузить не более 10 изображений. Первые 10 будут использованы.")
+                uploaded_files = uploaded_files[:10]
             
             # Обрабатываем каждый файл
             st.session_state.uploaded_images = []
             progress_bar = st.progress(0)
+            status_text = st.empty()
             
             for i, uploaded_file in enumerate(uploaded_files):
                 try:
+                    status_text.text(f"🔄 Обработка {uploaded_file.name}...")
+                    
                     # Читаем файл
                     bytes_data = uploaded_file.getvalue()
                     
-                    # Обрабатываем изображение
-                    processed = st.session_state.generator.process_image(bytes_data)
+                    # Проверяем размер
+                    if len(bytes_data) > 32 * 1024 * 1024:  # 32 МБ
+                        st.warning(f"❌ {uploaded_file.name} превышает 32 МБ и не будет загружен")
+                        continue
                     
-                    if processed:
+                    # Загружаем на Freeimage.host
+                    status_text.text(f"📤 Загрузка {uploaded_file.name} на Freeimage.host...")
+                    image_url = st.session_state.generator.upload_to_freeimage(
+                        bytes_data, 
+                        f"telegram_photo_{int(time.time())}.jpg"
+                    )
+                    
+                    if image_url:
+                        # Создаем превью
+                        image = Image.open(io.BytesIO(bytes_data))
+                        image.thumbnail((200, 200))
+                        img_byte_arr = io.BytesIO()
+                        image.save(img_byte_arr, format='JPEG')
+                        thumbnail = img_byte_arr.getvalue()
+                        
                         st.session_state.uploaded_images.append({
-                            "data": processed,
                             "name": uploaded_file.name,
-                            "thumbnail": bytes_data
+                            "thumbnail": thumbnail,
+                            "url": image_url,
+                            "bytes": bytes_data
                         })
+                        
+                        status_text.text(f"✅ {uploaded_file.name} загружен")
+                    else:
+                        st.warning(f"❌ Не удалось загрузить {uploaded_file.name}")
                     
                     progress_bar.progress((i + 1) / len(uploaded_files))
                     
@@ -273,25 +505,32 @@ def main():
                     st.error(f"Ошибка при обработке {uploaded_file.name}: {str(e)}")
             
             progress_bar.empty()
+            status_text.empty()
             
             if st.session_state.uploaded_images:
-                st.success(f"✅ Загружено {len(st.session_state.uploaded_images)} изображений")
+                st.success(f"✅ Успешно загружено {len(st.session_state.uploaded_images)} изображений")
         
         # Отображение загруженных изображений
         if st.session_state.uploaded_images:
             st.subheader("🖼️ Загруженные изображения")
             
             # Создаем сетку для превью
-            cols = st.columns(min(len(st.session_state.uploaded_images), 4))
+            cols_per_row = 5
+            rows = (len(st.session_state.uploaded_images) + cols_per_row - 1) // cols_per_row
             
-            for idx, img_data in enumerate(st.session_state.uploaded_images):
-                with cols[idx % 4]:
-                    # Отображаем превью
-                    st.image(
-                        img_data["thumbnail"],
-                        caption=img_data["name"][:15] + "..." if len(img_data["name"]) > 15 else img_data["name"],
-                        use_column_width=True
-                    )
+            for row in range(rows):
+                cols = st.columns(cols_per_row)
+                for col_idx in range(cols_per_row):
+                    img_idx = row * cols_per_row + col_idx
+                    if img_idx < len(st.session_state.uploaded_images):
+                        img_data = st.session_state.uploaded_images[img_idx]
+                        with cols[col_idx]:
+                            st.image(
+                                img_data["thumbnail"],
+                                caption=f"{img_idx + 1}. {img_data['name'][:10]}...",
+                                use_column_width=True
+                            )
+                            st.caption(f"✅ Загружено")
             
             # Кнопка очистки
             if st.button("🗑️ Очистить все изображения", disabled=st.session_state.processing):
@@ -322,29 +561,48 @@ def main():
             )
         )
         
-        # Область для результата
+        # Область для результата и статуса
         result_placeholder = st.empty()
+        status_placeholder = st.empty()
         
         # Обработка генерации
         if generate_button:
             st.session_state.processing = True
+            st.session_state.task_id = None
             
             try:
-                # Подготавливаем данные для API
-                images_data = [img["data"] for img in st.session_state.uploaded_images]
+                # Извлекаем URL изображений
+                references_urls = [img["url"] for img in st.session_state.uploaded_images if "url" in img]
+                
+                if not references_urls:
+                    st.error("❌ Нет доступных URL изображений")
+                    st.session_state.processing = False
+                    st.rerun()
                 
                 # Показываем прогресс
-                with st.spinner("🔄 Генерация изображения... Это может занять 30-60 секунд"):
-                    
-                    # Отправляем запрос на генерацию
-                    gen_result = st.session_state.generator.generate_multi_image(prompt, images_data)
-                    
-                    if gen_result and "error" not in gen_result:
-                        if 'data' in gen_result and 'task_id' in gen_result['data']:
-                            task_id = gen_result['data']['task_id']
-                            
-                            # Получаем URL изображения
-                            image_url = st.session_state.generator.get_task_result(task_id)
+                with status_placeholder.container():
+                    st.info(f"🔄 Отправка запроса в API Yes Ai...")
+                
+                # Отправляем запрос на генерацию
+                gen_result = st.session_state.generator.generate_multi_image(
+                    prompt, 
+                    references_urls, 
+                    st.session_state.customer_id
+                )
+                
+                if gen_result and "error" not in gen_result:
+                    if 'results' in gen_result and 'generation_data' in gen_result['results']:
+                        api_task_id = gen_result['results']['generation_data']['id']
+                        st.session_state.task_id = api_task_id
+                        
+                        with status_placeholder.container():
+                            st.info(f"🆔 ID задачи: `{api_task_id}`\n\n⏳ Ожидание результата... Это может занять 30-60 секунд")
+                        
+                        # Получаем результат
+                        task_result = st.session_state.generator.get_task_result(api_task_id, max_attempts=30, wait_time=5)
+                        
+                        if task_result and task_result.get("status") == "success":
+                            image_url = task_result.get("image_url")
                             
                             if image_url:
                                 # Скачиваем и сохраняем изображение локально
@@ -353,34 +611,43 @@ def main():
                                 if local_path:
                                     st.session_state.last_result_path = local_path
                                     
-                                    # Отображаем результат из локального файла
+                                    # Отображаем результат
                                     with result_placeholder.container():
                                         st.success("✅ Генерация завершена!")
                                         st.image(local_path, caption="Результат", use_column_width=True)
                                         
                                         # Кнопка для скачивания
                                         with open(local_path, "rb") as file:
-                                            btn = st.download_button(
+                                            st.download_button(
                                                 label="📥 Скачать изображение",
                                                 data=file,
                                                 file_name=f"generated_{uuid.uuid4()}.jpg",
-                                                mime="image/jpeg"
+                                                mime="image/jpeg",
+                                                use_container_width=True
                                             )
+                                        
+                                        st.caption(f"🆔 ID задачи: {api_task_id}")
                                 else:
                                     st.error("❌ Не удалось сохранить изображение локально")
                             else:
-                                st.error("❌ Не удалось получить результат генерации")
+                                st.error("❌ Не получен URL изображения")
+                        elif task_result:
+                            error_msg = task_result.get("error", "Неизвестная ошибка")
+                            st.error(f"❌ Ошибка генерации: {error_msg}")
                         else:
-                            st.error(f"❌ Ошибка API: {gen_result}")
+                            st.error("❌ Не удалось получить результат генерации")
                     else:
-                        error_msg = gen_result.get("error", "Неизвестная ошибка") if gen_result else "Ошибка подключения"
-                        st.error(f"❌ Ошибка при генерации: {error_msg}")
+                        st.error(f"❌ Ошибка API: {gen_result}")
+                else:
+                    error_msg = gen_result.get("message", gen_result.get("error", "Неизвестная ошибка")) if gen_result else "Ошибка подключения"
+                    st.error(f"❌ Ошибка при генерации: {error_msg}")
                 
             except Exception as e:
                 st.error(f"❌ Произошла ошибка: {str(e)}")
                 logger.error(f"Ошибка генерации: {e}", exc_info=True)
             
             finally:
+                status_placeholder.empty()
                 st.session_state.processing = False
                 st.rerun()
         
@@ -392,13 +659,16 @@ def main():
                     st.image(st.session_state.last_result_path, caption="Результат", use_column_width=True)
                     
                     with open(st.session_state.last_result_path, "rb") as file:
-                        btn = st.download_button(
+                        st.download_button(
                             label="📥 Скачать изображение",
                             data=file,
                             file_name=f"generated_{uuid.uuid4()}.jpg",
-                            mime="image/jpeg"
+                            mime="image/jpeg",
+                            use_container_width=True
                         )
+                    
+                    if st.session_state.task_id:
+                        st.caption(f"🆔 ID задачи: {st.session_state.task_id}")
 
 if __name__ == "__main__":
     main()
-
