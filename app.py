@@ -352,6 +352,36 @@ class ImageGenerator:
             logger.error(f"Ошибка при скачивании изображения: {e}")
             return None
 
+def build_prompt(base_prompt: str, toggles: dict) -> str:
+    """
+    Строит финальный промпт на основе базового промпта и активных тумблеров
+    """
+    # Словарь с текстами для каждого тумблера
+    toggle_texts = {
+        'price_tags': "add price tags to all products",
+        'random_angle': "поменять случайно ракурс",
+        'messy_shelf': "make shelf look messy after shopping",
+        'professional_arrangement': "make shelf look professionally arranged",
+        'auto_fix': "make shelf look professionally arranged"  # Один и тот же текст для двух тумблеров
+    }
+    
+    # Собираем активные тексты
+    active_texts = []
+    for toggle_id, is_active in toggles.items():
+        if is_active and toggle_id in toggle_texts:
+            active_texts.append(toggle_texts[toggle_id])
+    
+    # Если нет активных тумблеров, возвращаем базовый промпт
+    if not active_texts:
+        return base_prompt.strip()
+    
+    # Если базовый промпт пустой, возвращаем только тексты тумблеров
+    if not base_prompt or not base_prompt.strip():
+        return ", ".join(active_texts)
+    
+    # Иначе объединяем базовый промпт с текстами тумблеров
+    return f"{base_prompt.strip()}, {', '.join(active_texts)}"
+
 def main():
     """Основная функция Streamlit приложения"""
     
@@ -397,20 +427,15 @@ def main():
         **Как это работает:**
         1. Загрузите до 10 изображений
         2. Напишите промпт (описание желаемого результата)
-        3. Нажмите "Сгенерировать"
-        4. Подождите 30-60 секунд
+        3. Настройте параметры генерации с помощью ползунков
+        4. Нажмите "Сгенерировать"
+        5. Подождите 30-60 секунд
         
         **Особенности:**
         • Изображения загружаются на Freeimage.host
         • До 10 референсных изображений
         • Нейросеть Nano Banana 2
         • Формат: 16:9
-        
-        **Примеры промптов:**
-        - "Объедините эти изображения в коллаж"
-        - "Создайте новое изображение на основе этих картинок"
-        - "Поместите все объекты на один фон"
-        - "Смешайте стили этих изображений"
         """)
         
         st.markdown("---")
@@ -435,7 +460,7 @@ def main():
             st.rerun()
     
     # Основная область
-    col1, col2 = st.columns(2)
+    col1, col2 = st.columns([3, 2])
     
     with col1:
         st.subheader("📤 Загрузка изображений (до 10 шт.)")
@@ -538,15 +563,74 @@ def main():
                 st.rerun()
     
     with col2:
-        st.subheader("📝 Промпт и генерация")
+        st.subheader("📝 Промпт и настройки")
         
         # Поле для ввода промпта
-        prompt = st.text_area(
-            "Введите описание желаемого результата:",
-            height=100,
-            placeholder="Например: Объедините все изображения в один коллаж на фоне заката...",
-            disabled=st.session_state.processing or len(st.session_state.uploaded_images) == 0
+        base_prompt = st.text_area(
+            "Введите базовое описание (необязательно):",
+            height=80,
+            placeholder="Например: фотография полки с продуктами... (можно оставить пустым)",
+            disabled=st.session_state.processing or len(st.session_state.uploaded_images) == 0,
+            key="base_prompt"
         )
+        
+        st.markdown("### 🎛️ Настройки генерации")
+        st.markdown("*Включите нужные опции для модификации промпта*")
+        
+        # Создаем колонки для ползунков (2 колонки для компактности)
+        toggle_col1, toggle_col2 = st.columns(2)
+        
+        with toggle_col1:
+            price_tags = st.toggle(
+                "🏷️ Добавить ценники", 
+                value=False,
+                help="Добавляет к промпту: 'add price tags to all products'"
+            )
+            
+            random_angle = st.toggle(
+                "🔄 Случайный ракурс", 
+                value=False,
+                help="Добавляет к промпту: 'поменять случайно ракурс'"
+            )
+            
+            messy_shelf = st.toggle(
+                "📦 Неопрятная полка", 
+                value=False,
+                help="Добавляет к промпту: 'make shelf look messy after shopping'"
+            )
+        
+        with toggle_col2:
+            professional_arrangement = st.toggle(
+                "✨ Профессиональная выкладка", 
+                value=False,
+                help="Добавляет к промпту: 'make shelf look professionally arranged'"
+            )
+            
+            auto_fix = st.toggle(
+                "🔧 Автоисправление", 
+                value=False,
+                help="Добавляет к промпту: 'make shelf look professionally arranged'"
+            )
+        
+        st.markdown("---")
+        
+        # Собираем состояние всех тумблеров
+        toggles = {
+            'price_tags': price_tags,
+            'random_angle': random_angle,
+            'messy_shelf': messy_shelf,
+            'professional_arrangement': professional_arrangement,
+            'auto_fix': auto_fix
+        }
+        
+        # Строим финальный промпт
+        final_prompt = build_prompt(base_prompt, toggles)
+        
+        # Отображаем финальный промпт (для наглядности)
+        if final_prompt:
+            st.info(f"📝 **Финальный промпт:**\n{final_prompt}")
+        else:
+            st.warning("⚠️ Промпт пуст. Будет использован промпт из настроек.")
         
         # Кнопка генерации
         generate_button = st.button(
@@ -555,9 +639,7 @@ def main():
             use_container_width=True,
             disabled=(
                 st.session_state.processing or 
-                len(st.session_state.uploaded_images) == 0 or 
-                not prompt or 
-                len(prompt.strip()) < 3
+                len(st.session_state.uploaded_images) == 0
             )
         )
         
@@ -585,7 +667,7 @@ def main():
                 
                 # Отправляем запрос на генерацию
                 gen_result = st.session_state.generator.generate_multi_image(
-                    prompt, 
+                    final_prompt, 
                     references_urls, 
                     st.session_state.customer_id
                 )
