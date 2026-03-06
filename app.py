@@ -161,7 +161,7 @@ class ImageGenerator:
             "version": "v.2",
             "prompt": prompt,
             "style": "0",
-            "dimensions": "9:16",
+            "dimensions": "16:9",
             "customer_id": customer_id
         }
         
@@ -231,7 +231,7 @@ class ImageGenerator:
             "version": "v.2",
             "prompt": prompt,
             "style": "0",
-            "dimensions": "9:16",
+            "dimensions": "16:9",
             "customer_id": customer_id,
             "references_urls": valid_urls
         }
@@ -362,7 +362,7 @@ def build_prompt(base_prompt: str, toggles: dict) -> str:
         'random_angle': "поменять случайно ракурс",
         'messy_shelf': "make shelf look messy after shopping",
         'professional_arrangement': "make shelf look professionally arranged",
-        'auto_fix': "make shelf look professionally arranged"  # Один и тот же текст для двух тумблеров
+        'auto_fix': "make shelf look professionally arranged"
     }
     
     # Собираем активные тексты
@@ -512,6 +512,9 @@ def main():
             'auto_fix': False
         }
     
+    if 'generation_completed' not in st.session_state:
+        st.session_state.generation_completed = False
+    
     # Боковая панель с информацией
     with st.sidebar:
         st.header("ℹ️ Информация")
@@ -542,6 +545,8 @@ def main():
                 # Очищаем кэш в session_state
                 st.session_state.uploaded_files_cache = {}
                 st.session_state.uploaded_images = []
+                st.session_state.last_result_path = None
+                st.session_state.generation_completed = False
                 
                 # Удаляем файлы
                 for filename in os.listdir(IMAGES_FOLDER):
@@ -581,6 +586,9 @@ def main():
             if 'last_files_key' not in st.session_state or st.session_state.last_files_key != current_files_key:
                 st.session_state.last_files_key = current_files_key
                 st.session_state.uploaded_images = process_uploaded_files(uploaded_files)
+                # Сбрасываем результат при загрузке новых изображений
+                st.session_state.last_result_path = None
+                st.session_state.generation_completed = False
                 
                 if st.session_state.uploaded_images:
                     st.success(f"✅ Успешно загружено {len(st.session_state.uploaded_images)} изображений")
@@ -611,6 +619,8 @@ def main():
             if st.button("🗑️ Очистить все изображения", disabled=st.session_state.processing):
                 st.session_state.uploaded_images = []
                 st.session_state.uploaded_files_cache = {}
+                st.session_state.last_result_path = None
+                st.session_state.generation_completed = False
                 st.rerun()
     
     with col2:
@@ -709,9 +719,10 @@ def main():
         status_placeholder = st.empty()
         
         # Обработка генерации
-        if generate_button:
+        if generate_button and not st.session_state.processing:
             st.session_state.processing = True
             st.session_state.task_id = None
+            st.session_state.generation_completed = False
             
             try:
                 # Извлекаем URL изображений
@@ -720,7 +731,7 @@ def main():
                 if not references_urls:
                     st.error("❌ Нет доступных URL изображений")
                     st.session_state.processing = False
-                    st.rerun()
+                    return
                 
                 # Показываем прогресс
                 with status_placeholder.container():
@@ -739,7 +750,8 @@ def main():
                         st.session_state.task_id = api_task_id
                         
                         with status_placeholder.container():
-                            st.info(f"🆔 ID задачи: `{api_task_id}`\n\n⏳ Ожидание результата... Это может занять 30-60 секунд")
+                            progress_text = st.empty()
+                            progress_text.info(f"🆔 ID задачи: `{api_task_id}`\n\n⏳ Ожидание результата... Это может занять 30-60 секунд")
                         
                         # Получаем результат
                         task_result = st.session_state.generator.get_task_result(api_task_id, max_attempts=30, wait_time=5)
@@ -753,6 +765,10 @@ def main():
                                 
                                 if local_path:
                                     st.session_state.last_result_path = local_path
+                                    st.session_state.generation_completed = True
+                                    
+                                    # Очищаем статус
+                                    status_placeholder.empty()
                                     
                                     # Отображаем результат
                                     with result_placeholder.container():
@@ -790,12 +806,10 @@ def main():
                 logger.error(f"Ошибка генерации: {e}", exc_info=True)
             
             finally:
-                status_placeholder.empty()
                 st.session_state.processing = False
-                st.rerun()
         
-        # Если не в процессе генерации, показываем последний результат (если есть)
-        elif not st.session_state.processing and st.session_state.last_result_path:
+        # Если генерация завершена и есть результат, показываем его
+        elif st.session_state.generation_completed and st.session_state.last_result_path:
             if os.path.exists(st.session_state.last_result_path):
                 with result_placeholder.container():
                     st.subheader("🎨 Последний результат")
@@ -815,4 +829,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
