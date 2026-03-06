@@ -373,7 +373,7 @@ def build_prompt(base_prompt: str, toggles: dict) -> str:
     
     # Если нет активных тумблеров, возвращаем базовый промпт
     if not active_texts:
-        return base_prompt.strip()
+        return base_prompt.strip() if base_prompt else ""
     
     # Если базовый промпт пустой, возвращаем только тексты тумблеров
     if not base_prompt or not base_prompt.strip():
@@ -381,6 +381,88 @@ def build_prompt(base_prompt: str, toggles: dict) -> str:
     
     # Иначе объединяем базовый промпт с текстами тумблеров
     return f"{base_prompt.strip()}, {', '.join(active_texts)}"
+
+def process_uploaded_files(uploaded_files):
+    """Обрабатывает загруженные файлы и возвращает список изображений"""
+    if not uploaded_files:
+        return []
+    
+    # Ограничиваем количество файлов
+    if len(uploaded_files) > 10:
+        st.warning("Можно загрузить не более 10 изображений. Первые 10 будут использованы.")
+        uploaded_files = uploaded_files[:10]
+    
+    processed_images = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, uploaded_file in enumerate(uploaded_files):
+        try:
+            # Проверяем, не загружали ли мы уже этот файл
+            file_key = f"{uploaded_file.name}_{uploaded_file.size}"
+            
+            # Если файл уже есть в session_state, пропускаем загрузку
+            if 'uploaded_files_cache' not in st.session_state:
+                st.session_state.uploaded_files_cache = {}
+            
+            if file_key in st.session_state.uploaded_files_cache:
+                cached_image = st.session_state.uploaded_files_cache[file_key]
+                processed_images.append(cached_image)
+                status_text.text(f"✅ {uploaded_file.name} (из кэша)")
+                progress_bar.progress((i + 1) / len(uploaded_files))
+                continue
+            
+            status_text.text(f"🔄 Обработка {uploaded_file.name}...")
+            
+            # Читаем файл
+            bytes_data = uploaded_file.getvalue()
+            
+            # Проверяем размер
+            if len(bytes_data) > 32 * 1024 * 1024:  # 32 МБ
+                st.warning(f"❌ {uploaded_file.name} превышает 32 МБ и не будет загружен")
+                continue
+            
+            # Загружаем на Freeimage.host
+            generator = ImageGenerator()
+            status_text.text(f"📤 Загрузка {uploaded_file.name} на Freeimage.host...")
+            image_url = generator.upload_to_freeimage(
+                bytes_data, 
+                f"image_{int(time.time())}_{i}.jpg"
+            )
+            
+            if image_url:
+                # Создаем превью
+                image = Image.open(io.BytesIO(bytes_data))
+                image.thumbnail((200, 200))
+                img_byte_arr = io.BytesIO()
+                image.save(img_byte_arr, format='JPEG')
+                thumbnail = img_byte_arr.getvalue()
+                
+                image_info = {
+                    "name": uploaded_file.name,
+                    "thumbnail": thumbnail,
+                    "url": image_url,
+                    "bytes": bytes_data,
+                    "file_key": file_key
+                }
+                
+                # Сохраняем в кэш
+                st.session_state.uploaded_files_cache[file_key] = image_info
+                processed_images.append(image_info)
+                
+                status_text.text(f"✅ {uploaded_file.name} загружен")
+            else:
+                st.warning(f"❌ Не удалось загрузить {uploaded_file.name}")
+            
+            progress_bar.progress((i + 1) / len(uploaded_files))
+            
+        except Exception as e:
+            st.error(f"Ошибка при обработке {uploaded_file.name}: {str(e)}")
+    
+    progress_bar.empty()
+    status_text.empty()
+    
+    return processed_images
 
 def main():
     """Основная функция Streamlit приложения"""
@@ -396,7 +478,7 @@ def main():
     st.title("🎨 Генератор изображений на базе Yes Ai")
     st.markdown("---")
     
-    # Инициализация генератора в session state
+    # Инициализация session state
     if 'generator' not in st.session_state:
         st.session_state.generator = ImageGenerator()
     
@@ -406,9 +488,6 @@ def main():
     if 'processing' not in st.session_state:
         st.session_state.processing = False
     
-    if 'last_result' not in st.session_state:
-        st.session_state.last_result = None
-    
     if 'last_result_path' not in st.session_state:
         st.session_state.last_result_path = None
     
@@ -417,6 +496,21 @@ def main():
     
     if 'customer_id' not in st.session_state:
         st.session_state.customer_id = str(uuid.uuid4())[:8]
+    
+    if 'uploaded_files_cache' not in st.session_state:
+        st.session_state.uploaded_files_cache = {}
+    
+    if 'current_prompt' not in st.session_state:
+        st.session_state.current_prompt = ""
+    
+    if 'toggle_states' not in st.session_state:
+        st.session_state.toggle_states = {
+            'price_tags': False,
+            'random_angle': False,
+            'messy_shelf': False,
+            'professional_arrangement': False,
+            'auto_fix': False
+        }
     
     # Боковая панель с информацией
     with st.sidebar:
@@ -432,7 +526,7 @@ def main():
         5. Подождите 30-60 секунд
         
         **Особенности:**
-        • Изображения загружаются на Freeimage.host
+        • Изображения кэшируются - не загружаются повторно
         • До 10 референсных изображений
         • Нейросеть Nano Banana 2
         • Формат: 16:9
@@ -442,15 +536,20 @@ def main():
         st.markdown("**Статус:**")
         st.info(f"📎 Загружено изображений: {len(st.session_state.uploaded_images)}/10")
         
-        # Кнопка очистки старых изображений
+        # Кнопка очистки кэша
         if st.button("🗑️ Очистить кэш изображений", use_container_width=True):
             try:
-                # Удаляем все файлы в папке images
+                # Очищаем кэш в session_state
+                st.session_state.uploaded_files_cache = {}
+                st.session_state.uploaded_images = []
+                
+                # Удаляем файлы
                 for filename in os.listdir(IMAGES_FOLDER):
                     filepath = os.path.join(IMAGES_FOLDER, filename)
                     if os.path.isfile(filepath):
                         os.remove(filepath)
                 st.success("✅ Кэш очищен")
+                st.rerun()
             except Exception as e:
                 st.error(f"Ошибка при очистке: {e}")
         
@@ -474,66 +573,17 @@ def main():
             disabled=st.session_state.processing
         )
         
-        # Обработка загруженных файлов
+        # Обработка загруженных файлов (только если есть новые файлы)
         if uploaded_files and not st.session_state.processing:
-            # Ограничиваем количество файлов
-            if len(uploaded_files) > 10:
-                st.warning("Можно загрузить не более 10 изображений. Первые 10 будут использованы.")
-                uploaded_files = uploaded_files[:10]
+            # Проверяем, изменились ли файлы
+            current_files_key = str([(f.name, f.size) for f in uploaded_files])
             
-            # Обрабатываем каждый файл
-            st.session_state.uploaded_images = []
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            for i, uploaded_file in enumerate(uploaded_files):
-                try:
-                    status_text.text(f"🔄 Обработка {uploaded_file.name}...")
-                    
-                    # Читаем файл
-                    bytes_data = uploaded_file.getvalue()
-                    
-                    # Проверяем размер
-                    if len(bytes_data) > 32 * 1024 * 1024:  # 32 МБ
-                        st.warning(f"❌ {uploaded_file.name} превышает 32 МБ и не будет загружен")
-                        continue
-                    
-                    # Загружаем на Freeimage.host
-                    status_text.text(f"📤 Загрузка {uploaded_file.name} на Freeimage.host...")
-                    image_url = st.session_state.generator.upload_to_freeimage(
-                        bytes_data, 
-                        f"telegram_photo_{int(time.time())}.jpg"
-                    )
-                    
-                    if image_url:
-                        # Создаем превью
-                        image = Image.open(io.BytesIO(bytes_data))
-                        image.thumbnail((200, 200))
-                        img_byte_arr = io.BytesIO()
-                        image.save(img_byte_arr, format='JPEG')
-                        thumbnail = img_byte_arr.getvalue()
-                        
-                        st.session_state.uploaded_images.append({
-                            "name": uploaded_file.name,
-                            "thumbnail": thumbnail,
-                            "url": image_url,
-                            "bytes": bytes_data
-                        })
-                        
-                        status_text.text(f"✅ {uploaded_file.name} загружен")
-                    else:
-                        st.warning(f"❌ Не удалось загрузить {uploaded_file.name}")
-                    
-                    progress_bar.progress((i + 1) / len(uploaded_files))
-                    
-                except Exception as e:
-                    st.error(f"Ошибка при обработке {uploaded_file.name}: {str(e)}")
-            
-            progress_bar.empty()
-            status_text.empty()
-            
-            if st.session_state.uploaded_images:
-                st.success(f"✅ Успешно загружено {len(st.session_state.uploaded_images)} изображений")
+            if 'last_files_key' not in st.session_state or st.session_state.last_files_key != current_files_key:
+                st.session_state.last_files_key = current_files_key
+                st.session_state.uploaded_images = process_uploaded_files(uploaded_files)
+                
+                if st.session_state.uploaded_images:
+                    st.success(f"✅ Успешно загружено {len(st.session_state.uploaded_images)} изображений")
         
         # Отображение загруженных изображений
         if st.session_state.uploaded_images:
@@ -560,6 +610,7 @@ def main():
             # Кнопка очистки
             if st.button("🗑️ Очистить все изображения", disabled=st.session_state.processing):
                 st.session_state.uploaded_images = []
+                st.session_state.uploaded_files_cache = {}
                 st.rerun()
     
     with col2:
@@ -568,54 +619,62 @@ def main():
         # Поле для ввода промпта
         base_prompt = st.text_area(
             "Введите базовое описание (необязательно):",
+            value=st.session_state.current_prompt,
             height=80,
             placeholder="Например: фотография полки с продуктами... (можно оставить пустым)",
             disabled=st.session_state.processing or len(st.session_state.uploaded_images) == 0,
-            key="base_prompt"
+            key="base_prompt_input"
         )
+        
+        # Обновляем промпт в session state
+        if base_prompt != st.session_state.current_prompt:
+            st.session_state.current_prompt = base_prompt
         
         st.markdown("### 🎛️ Настройки генерации")
         st.markdown("*Включите нужные опции для модификации промпта*")
         
-        # Создаем колонки для ползунков (2 колонки для компактности)
+        # Создаем колонки для ползунков
         toggle_col1, toggle_col2 = st.columns(2)
         
         with toggle_col1:
             price_tags = st.toggle(
                 "🏷️ Добавить ценники", 
-                value=False,
+                value=st.session_state.toggle_states['price_tags'],
+                key="toggle_price_tags",
                 help="Добавляет к промпту: 'add price tags to all products'"
             )
             
             random_angle = st.toggle(
                 "🔄 Случайный ракурс", 
-                value=False,
+                value=st.session_state.toggle_states['random_angle'],
+                key="toggle_random_angle",
                 help="Добавляет к промпту: 'поменять случайно ракурс'"
             )
             
             messy_shelf = st.toggle(
                 "📦 Неопрятная полка", 
-                value=False,
+                value=st.session_state.toggle_states['messy_shelf'],
+                key="toggle_messy_shelf",
                 help="Добавляет к промпту: 'make shelf look messy after shopping'"
             )
         
         with toggle_col2:
             professional_arrangement = st.toggle(
                 "✨ Профессиональная выкладка", 
-                value=False,
+                value=st.session_state.toggle_states['professional_arrangement'],
+                key="toggle_professional",
                 help="Добавляет к промпту: 'make shelf look professionally arranged'"
             )
             
             auto_fix = st.toggle(
                 "🔧 Автоисправление", 
-                value=False,
+                value=st.session_state.toggle_states['auto_fix'],
+                key="toggle_autofix",
                 help="Добавляет к промпту: 'make shelf look professionally arranged'"
             )
         
-        st.markdown("---")
-        
-        # Собираем состояние всех тумблеров
-        toggles = {
+        # Обновляем состояния тумблеров в session state
+        st.session_state.toggle_states = {
             'price_tags': price_tags,
             'random_angle': random_angle,
             'messy_shelf': messy_shelf,
@@ -623,14 +682,16 @@ def main():
             'auto_fix': auto_fix
         }
         
-        # Строим финальный промпт
-        final_prompt = build_prompt(base_prompt, toggles)
+        st.markdown("---")
         
-        # Отображаем финальный промпт (для наглядности)
+        # Строим финальный промпт
+        final_prompt = build_prompt(st.session_state.current_prompt, st.session_state.toggle_states)
+        
+        # Отображаем финальный промпт
         if final_prompt:
             st.info(f"📝 **Финальный промпт:**\n{final_prompt}")
         else:
-            st.warning("⚠️ Промпт пуст. Будет использован промпт из настроек.")
+            st.warning("⚠️ Промпт пуст. Будут использованы только настройки.")
         
         # Кнопка генерации
         generate_button = st.button(
