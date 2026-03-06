@@ -161,7 +161,7 @@ class ImageGenerator:
             "version": "v.2",
             "prompt": prompt,
             "style": "0",
-            "dimensions": "16:9",
+            "dimensions": "9:16",
             "customer_id": customer_id
         }
         
@@ -231,7 +231,7 @@ class ImageGenerator:
             "version": "v.2",
             "prompt": prompt,
             "style": "0",
-            "dimensions": "16:9",
+            "dimensions": "9:16",
             "customer_id": customer_id,
             "references_urls": valid_urls
         }
@@ -532,7 +532,7 @@ def main():
         • Изображения кэшируются - не загружаются повторно
         • До 10 референсных изображений
         • Нейросеть Nano Banana 2
-        • Формат: 16:9
+        • Формат: 9:16
         """)
         
         st.markdown("---")
@@ -829,3 +829,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
