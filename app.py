@@ -288,18 +288,23 @@ class ImageGenerator:
                     continue
                 
                 result = response.json()
+                logger.info(f"Полный ответ API: {json.dumps(result, indent=2)}")
                 
                 if 'results' in result and 'generation_data' in result['results']:
                     data = result['results']['generation_data']
                     status = data.get('status')
+                    result_url = data.get('result_url')
                     
-                    logger.info(f"Попытка {attempt + 1}: статус {status}")
+                    logger.info(f"Попытка {attempt + 1}: статус={status}, result_url={result_url}")
                     
-                    if status == 2 and 'result_url' in data and data['result_url']:
-                        return {
-                            "status": "success",
-                            "image_url": data['result_url']
-                        }
+                    if status == 2:
+                        if result_url:
+                            return {
+                                "status": "success",
+                                "image_url": result_url
+                            }
+                        else:
+                            logger.warning(f"Статус 2, но result_url пустой")
                     
                     elif status == 3:
                         error_msg = data.get('comment_ru') or data.get('comment_en') or "Ошибка генерации"
@@ -330,12 +335,19 @@ class ImageGenerator:
     def download_and_save_image(self, image_url: str) -> Optional[str]:
         """Скачивает изображение по URL и сохраняет локально"""
         try:
+            logger.info(f"Скачивание изображения с URL: {image_url}")
+            
             # Скачиваем изображение
             response = requests.get(image_url, timeout=30)
             
             if response.status_code != 200:
                 logger.error(f"Не удалось скачать изображение: {response.status_code}")
                 return None
+            
+            # Проверяем, что это действительно изображение
+            content_type = response.headers.get('Content-Type', '')
+            if not content_type.startswith('image/'):
+                logger.warning(f"Получен неожиданный Content-Type: {content_type}")
             
             # Генерируем уникальное имя файла
             filename = f"{uuid.uuid4()}.jpg"
@@ -345,8 +357,21 @@ class ImageGenerator:
             with open(filepath, 'wb') as f:
                 f.write(response.content)
             
-            logger.info(f"Изображение сохранено: {filepath}")
-            return filepath
+            # Проверяем, что файл сохранен и может быть открыт
+            if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+                # Пробуем открыть изображение для проверки
+                try:
+                    img = Image.open(filepath)
+                    img.verify()
+                    logger.info(f"Изображение успешно сохранено и проверено: {filepath}")
+                    return filepath
+                except Exception as e:
+                    logger.error(f"Сохраненный файл не является корректным изображением: {e}")
+                    os.remove(filepath)
+                    return None
+            else:
+                logger.error(f"Файл не сохранен или пустой: {filepath}")
+                return None
             
         except Exception as e:
             logger.error(f"Ошибка при скачивании изображения: {e}")
@@ -491,6 +516,9 @@ def main():
     if 'last_result_path' not in st.session_state:
         st.session_state.last_result_path = None
     
+    if 'last_result_url' not in st.session_state:
+        st.session_state.last_result_url = None
+    
     if 'task_id' not in st.session_state:
         st.session_state.task_id = None
     
@@ -546,6 +574,7 @@ def main():
                 st.session_state.uploaded_files_cache = {}
                 st.session_state.uploaded_images = []
                 st.session_state.last_result_path = None
+                st.session_state.last_result_url = None
                 st.session_state.generation_completed = False
                 
                 # Удаляем файлы
@@ -588,6 +617,7 @@ def main():
                 st.session_state.uploaded_images = process_uploaded_files(uploaded_files)
                 # Сбрасываем результат при загрузке новых изображений
                 st.session_state.last_result_path = None
+                st.session_state.last_result_url = None
                 st.session_state.generation_completed = False
                 
                 if st.session_state.uploaded_images:
@@ -620,6 +650,7 @@ def main():
                 st.session_state.uploaded_images = []
                 st.session_state.uploaded_files_cache = {}
                 st.session_state.last_result_path = None
+                st.session_state.last_result_url = None
                 st.session_state.generation_completed = False
                 st.rerun()
     
@@ -735,7 +766,8 @@ def main():
                 
                 # Показываем прогресс
                 with status_placeholder.container():
-                    st.info(f"🔄 Отправка запроса в API Yes Ai...")
+                    status_text = st.empty()
+                    status_text.info(f"🔄 Отправка запроса в API Yes Ai...")
                 
                 # Отправляем запрос на генерацию
                 gen_result = st.session_state.generator.generate_multi_image(
@@ -756,43 +788,52 @@ def main():
                         # Получаем результат
                         task_result = st.session_state.generator.get_task_result(api_task_id, max_attempts=30, wait_time=5)
                         
-                        if task_result and task_result.get("status") == "success":
-                            image_url = task_result.get("image_url")
+                        if task_result:
+                            logger.info(f"Результат задачи: {task_result}")
                             
-                            if image_url:
-                                # Скачиваем и сохраняем изображение локально
-                                local_path = st.session_state.generator.download_and_save_image(image_url)
+                            if task_result.get("status") == "success":
+                                image_url = task_result.get("image_url")
                                 
-                                if local_path:
-                                    st.session_state.last_result_path = local_path
-                                    st.session_state.generation_completed = True
+                                if image_url:
+                                    st.session_state.last_result_url = image_url
                                     
-                                    # Очищаем статус
-                                    status_placeholder.empty()
+                                    # Скачиваем и сохраняем изображение локально
+                                    with status_placeholder.container():
+                                        status_text.info(f"📥 Скачивание изображения...")
                                     
-                                    # Отображаем результат
-                                    with result_placeholder.container():
-                                        st.success("✅ Генерация завершена!")
-                                        st.image(local_path, caption="Результат", use_column_width=True)
+                                    local_path = st.session_state.generator.download_and_save_image(image_url)
+                                    
+                                    if local_path:
+                                        st.session_state.last_result_path = local_path
+                                        st.session_state.generation_completed = True
                                         
-                                        # Кнопка для скачивания
-                                        with open(local_path, "rb") as file:
-                                            st.download_button(
-                                                label="📥 Скачать изображение",
-                                                data=file,
-                                                file_name=f"generated_{uuid.uuid4()}.jpg",
-                                                mime="image/jpeg",
-                                                use_container_width=True
-                                            )
+                                        # Очищаем статус
+                                        status_placeholder.empty()
                                         
-                                        st.caption(f"🆔 ID задачи: {api_task_id}")
+                                        # Отображаем результат
+                                        with result_placeholder.container():
+                                            st.success("✅ Генерация завершена!")
+                                            st.image(local_path, caption="Результат", use_column_width=True)
+                                            
+                                            # Кнопка для скачивания
+                                            with open(local_path, "rb") as file:
+                                                st.download_button(
+                                                    label="📥 Скачать изображение",
+                                                    data=file,
+                                                    file_name=f"generated_{uuid.uuid4()}.jpg",
+                                                    mime="image/jpeg",
+                                                    use_container_width=True
+                                                )
+                                            
+                                            st.caption(f"🆔 ID задачи: {api_task_id}")
+                                            st.caption(f"🔗 URL: {image_url}")
+                                    else:
+                                        st.error("❌ Не удалось сохранить изображение локально")
                                 else:
-                                    st.error("❌ Не удалось сохранить изображение локально")
+                                    st.error("❌ Не получен URL изображения")
                             else:
-                                st.error("❌ Не получен URL изображения")
-                        elif task_result:
-                            error_msg = task_result.get("error", "Неизвестная ошибка")
-                            st.error(f"❌ Ошибка генерации: {error_msg}")
+                                error_msg = task_result.get("error", "Неизвестная ошибка")
+                                st.error(f"❌ Ошибка генерации: {error_msg}")
                         else:
                             st.error("❌ Не удалось получить результат генерации")
                     else:
@@ -807,6 +848,7 @@ def main():
             
             finally:
                 st.session_state.processing = False
+                st.rerun()
         
         # Если генерация завершена и есть результат, показываем его
         elif st.session_state.generation_completed and st.session_state.last_result_path:
@@ -826,7 +868,9 @@ def main():
                     
                     if st.session_state.task_id:
                         st.caption(f"🆔 ID задачи: {st.session_state.task_id}")
+                    
+                    if st.session_state.last_result_url:
+                        st.caption(f"🔗 URL: {st.session_state.last_result_url}")
 
 if __name__ == "__main__":
     main()
-
