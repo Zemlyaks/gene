@@ -9,6 +9,7 @@ from PIL import Image
 from typing import List, Optional
 import uuid
 import os
+from datetime import datetime
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -27,6 +28,50 @@ FREEIMAGE_API_URL = "https://freeimage.host/api/1/upload"
 IMAGES_FOLDER = "generated_images"
 os.makedirs(IMAGES_FOLDER, exist_ok=True)
 
+# Файл для сохранения состояния (на случай обновления страницы)
+STATE_FILE = "app_state.json"
+
+def save_state_to_file():
+    """Сохраняет важные состояния в файл"""
+    try:
+        state = {
+            'customer_id': st.session_state.get('customer_id', ''),
+            'last_result_path': st.session_state.get('last_result_path', ''),
+            'last_result_url': st.session_state.get('last_result_url', ''),
+            'task_id': st.session_state.get('task_id', ''),
+            'generation_completed': st.session_state.get('generation_completed', False),
+            'toggle_states': st.session_state.get('toggle_states', {}),
+            'current_prompt': st.session_state.get('current_prompt', ''),
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Сохраняем только если есть результат
+        if state['last_result_path'] or state['task_id']:
+            with open(STATE_FILE, 'w') as f:
+                json.dump(state, f)
+            logger.info(f"Состояние сохранено в файл")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении состояния: {e}")
+
+def load_state_from_file():
+    """Загружает состояние из файла"""
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, 'r') as f:
+                state = json.load(f)
+            
+            # Проверяем, не устарело ли состояние (больше 1 часа)
+            timestamp = datetime.fromisoformat(state.get('timestamp', '2000-01-01'))
+            if (datetime.now() - timestamp).seconds < 3600:  # 1 час
+                logger.info(f"Состояние загружено из файла")
+                return state
+            else:
+                logger.info(f"Состояние устарело, удаляем файл")
+                os.remove(STATE_FILE)
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке состояния: {e}")
+    return None
+
 class FreeImageUploader:
     """Класс для загрузки изображений на Freeimage.host"""
     
@@ -42,6 +87,10 @@ class FreeImageUploader:
             if not filename:
                 filename = f"image_{uuid.uuid4().hex[:8]}.jpg"
             
+            # Проверяем размер для мобильных устройств
+            if len(image_bytes) > 10 * 1024 * 1024:  # 10 МБ для мобильных
+                logger.warning(f"Изображение большое ({len(image_bytes)/1024/1024:.1f} МБ), может не загрузиться на мобильных")
+            
             # Кодируем изображение в base64
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
             
@@ -55,14 +104,13 @@ class FreeImageUploader:
             
             logger.info(f"Отправка изображения на Freeimage.host...")
             
-            response = requests.post(self.api_url, data=data, timeout=30)
+            # Увеличиваем таймаут для мобильных
+            response = requests.post(self.api_url, data=data, timeout=60)
             
             if response.status_code == 200:
                 result = response.json()
                 
-                # Проверяем статус ответа
                 if result.get('status_code') == 200 and result.get('success', {}).get('code') == 200:
-                    # Получаем прямую ссылку на изображение
                     image_url = result['image']['url']
                     logger.info(f"Изображение успешно загружено на Freeimage.host: {image_url}")
                     return image_url
@@ -88,7 +136,8 @@ class FreeImageUploader:
     def verify_image_url(self, url: str) -> bool:
         """Проверяет доступность URL изображения"""
         try:
-            response = requests.head(url, timeout=5, allow_redirects=True)
+            # Увеличиваем таймаут для мобильных
+            response = requests.head(url, timeout=10, allow_redirects=True)
             if response.status_code == 200:
                 content_type = response.headers.get('Content-Type', '')
                 if content_type.startswith('image/'):
@@ -124,7 +173,6 @@ class ImageGenerator:
     def process_image(self, image_bytes: bytes) -> Optional[dict]:
         """Обрабатывает изображение для отправки в API"""
         try:
-            # Определяем тип изображения
             image = Image.open(io.BytesIO(image_bytes))
             format_str = image.format
             
@@ -136,7 +184,6 @@ class ImageGenerator:
             }
             mime_type = mime_types.get(format_str, "image/jpeg")
             
-            # Конвертируем в base64
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
             
             logger.info(f"Изображение обработано: {mime_type}, размер: {len(base64_image)} символов")
@@ -155,67 +202,13 @@ class ImageGenerator:
         """Загружает изображение на Freeimage.host"""
         return self.image_uploader.upload_image(image_bytes, filename)
     
-    def generate_image(self, prompt: str, customer_id: str) -> dict:
-        """Генерация изображения по промпту"""
-        data = {
-            "version": "v.2",
-            "prompt": prompt,
-            "style": "0",
-            "dimensions": "9:16",
-            "customer_id": customer_id
-        }
-        
-        logger.info(f"Генерация изображения для customer_id: {customer_id}, prompt: {prompt[:50]}...")
-        
-        try:
-            response = requests.post(
-                API_URL_GEN_IMAGE,
-                headers=self.headers,
-                json=data,
-                timeout=60
-            )
-            
-            if response.status_code != 200:
-                error_text = response.text
-                logger.error(f"HTTP Error: {response.status}, Response: {error_text}")
-                
-                if "CUSTOMER_ID_IS_EMPTY" in error_text:
-                    return {"error": "CUSTOMER_ID_IS_EMPTY", "message": "Не указан ID клиента"}
-                elif "CUSTOMER_ID_NOT_VALID" in error_text:
-                    return {"error": "CUSTOMER_ID_NOT_VALID", "message": "Неверный формат ID клиента"}
-                elif "PROMPT_IS_EMPTY" in error_text:
-                    return {"error": "PROMPT_IS_EMPTY", "message": "Промпт не может быть пустым"}
-                elif "PROMPT_NSFW_WORDS" in error_text:
-                    return {"error": "PROMPT_NSFW_WORDS", "message": "Обнаружены запрещенные слова"}
-                
-                return {"error": f"HTTP {response.status}", "message": error_text}
-            
-            result = response.json()
-            logger.info(f"Успешный ответ от API: {result}")
-            return result
-            
-        except requests.exceptions.Timeout:
-            logger.error("Таймаут при генерации изображения")
-            return {"error": "timeout", "message": "Превышено время ожидания"}
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Ошибка подключения: {e}")
-            return {"error": "connection_error", "message": str(e)}
-        except Exception as e:
-            logger.error(f"Неожиданная ошибка: {e}")
-            return {"error": "unexpected_error", "message": str(e)}
-    
     def generate_multi_image(self, prompt: str, references_urls: List[str], customer_id: str) -> dict:
-        """
-        Генерация изображения с несколькими референсами
-        Поддерживается до 10 изображений
-        """
+        """Генерация изображения с несколькими референсами"""
         
-        # Ограничиваем количество референсов (максимум 10)
         if len(references_urls) > 10:
             logger.warning(f"Слишком много референсов: {len(references_urls)}, обрезаем до 10")
             references_urls = references_urls[:10]
         
-        # Проверяем доступность URL
         logger.info(f"Проверка {len(references_urls)} URL изображений...")
         valid_urls = self.image_uploader.verify_image_urls(references_urls)
         
@@ -226,7 +219,6 @@ class ImageGenerator:
         if len(valid_urls) < len(references_urls):
             logger.warning(f"Доступно только {len(valid_urls)} из {len(references_urls)} изображений")
         
-        # Формируем запрос
         data = {
             "version": "v.2",
             "prompt": prompt,
@@ -239,11 +231,12 @@ class ImageGenerator:
         logger.info(f"Multi-image генерация для customer_id: {customer_id}, референсов: {len(valid_urls)}")
         
         try:
+            # Увеличиваем таймаут для мобильных
             response = requests.post(
                 API_URL_GEN_IMAGE,
                 headers=self.headers,
                 json=data,
-                timeout=60
+                timeout=120
             )
             
             if response.status_code != 200:
@@ -279,16 +272,20 @@ class ImageGenerator:
             url = f"{API_URL_QUERY_IMAGE}{task_id}"
             
             for attempt in range(max_attempts):
+                # Увеличиваем время ожидания для мобильных
                 time.sleep(wait_time)
                 
-                response = requests.get(url, headers=self.headers, timeout=30)
+                try:
+                    response = requests.get(url, headers=self.headers, timeout=45)
+                except requests.exceptions.Timeout:
+                    logger.warning(f"Попытка {attempt + 1}: таймаут, продолжаем...")
+                    continue
                 
                 if response.status_code != 200:
                     logger.warning(f"Попытка {attempt + 1}: статус {response.status_code}")
                     continue
                 
                 result = response.json()
-                logger.info(f"Полный ответ API: {json.dumps(result, indent=2)}")
                 
                 if 'results' in result and 'generation_data' in result['results']:
                     data = result['results']['generation_data']
@@ -337,29 +334,24 @@ class ImageGenerator:
         try:
             logger.info(f"Скачивание изображения с URL: {image_url}")
             
-            # Скачиваем изображение
-            response = requests.get(image_url, timeout=30)
+            # Увеличиваем таймаут для мобильных
+            response = requests.get(image_url, timeout=60)
             
             if response.status_code != 200:
                 logger.error(f"Не удалось скачать изображение: {response.status_code}")
                 return None
             
-            # Проверяем, что это действительно изображение
             content_type = response.headers.get('Content-Type', '')
             if not content_type.startswith('image/'):
                 logger.warning(f"Получен неожиданный Content-Type: {content_type}")
             
-            # Генерируем уникальное имя файла
             filename = f"{uuid.uuid4()}.jpg"
             filepath = os.path.join(IMAGES_FOLDER, filename)
             
-            # Сохраняем изображение
             with open(filepath, 'wb') as f:
                 f.write(response.content)
             
-            # Проверяем, что файл сохранен и может быть открыт
             if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-                # Пробуем открыть изображение для проверки
                 try:
                     img = Image.open(filepath)
                     img.verify()
@@ -378,10 +370,7 @@ class ImageGenerator:
             return None
 
 def build_prompt(base_prompt: str, toggles: dict) -> str:
-    """
-    Строит финальный промпт на основе базового промпта и активных тумблеров
-    """
-    # Словарь с текстами для каждого тумблера
+    """Строит финальный промпт"""
     toggle_texts = {
         'price_tags': "add price tags to all products",
         'random_angle': "поменять случайно ракурс",
@@ -390,29 +379,24 @@ def build_prompt(base_prompt: str, toggles: dict) -> str:
         'auto_fix': "make shelf look professionally arranged"
     }
     
-    # Собираем активные тексты
     active_texts = []
     for toggle_id, is_active in toggles.items():
         if is_active and toggle_id in toggle_texts:
             active_texts.append(toggle_texts[toggle_id])
     
-    # Если нет активных тумблеров, возвращаем базовый промпт
     if not active_texts:
         return base_prompt.strip() if base_prompt else ""
     
-    # Если базовый промпт пустой, возвращаем только тексты тумблеров
     if not base_prompt or not base_prompt.strip():
         return ", ".join(active_texts)
     
-    # Иначе объединяем базовый промпт с текстами тумблеров
     return f"{base_prompt.strip()}, {', '.join(active_texts)}"
 
 def process_uploaded_files(uploaded_files):
-    """Обрабатывает загруженные файлы и возвращает список изображений"""
+    """Обрабатывает загруженные файлы"""
     if not uploaded_files:
         return []
     
-    # Ограничиваем количество файлов
     if len(uploaded_files) > 10:
         st.warning("Можно загрузить не более 10 изображений. Первые 10 будут использованы.")
         uploaded_files = uploaded_files[:10]
@@ -423,10 +407,8 @@ def process_uploaded_files(uploaded_files):
     
     for i, uploaded_file in enumerate(uploaded_files):
         try:
-            # Проверяем, не загружали ли мы уже этот файл
             file_key = f"{uploaded_file.name}_{uploaded_file.size}"
             
-            # Если файл уже есть в session_state, пропускаем загрузку
             if 'uploaded_files_cache' not in st.session_state:
                 st.session_state.uploaded_files_cache = {}
             
@@ -439,15 +421,16 @@ def process_uploaded_files(uploaded_files):
             
             status_text.text(f"🔄 Обработка {uploaded_file.name}...")
             
-            # Читаем файл
             bytes_data = uploaded_file.getvalue()
             
-            # Проверяем размер
-            if len(bytes_data) > 32 * 1024 * 1024:  # 32 МБ
+            # Для мобильных - предупреждение о больших файлах
+            if len(bytes_data) > 10 * 1024 * 1024:
+                st.warning(f"⚠️ {uploaded_file.name} большой ({len(bytes_data)/1024/1024:.1f} МБ). На мобильных может загружаться долго.")
+            
+            if len(bytes_data) > 32 * 1024 * 1024:
                 st.warning(f"❌ {uploaded_file.name} превышает 32 МБ и не будет загружен")
                 continue
             
-            # Загружаем на Freeimage.host
             generator = ImageGenerator()
             status_text.text(f"📤 Загрузка {uploaded_file.name} на Freeimage.host...")
             image_url = generator.upload_to_freeimage(
@@ -456,7 +439,6 @@ def process_uploaded_files(uploaded_files):
             )
             
             if image_url:
-                # Создаем превью
                 image = Image.open(io.BytesIO(bytes_data))
                 image.thumbnail((200, 200))
                 img_byte_arr = io.BytesIO()
@@ -471,7 +453,6 @@ def process_uploaded_files(uploaded_files):
                     "file_key": file_key
                 }
                 
-                # Сохраняем в кэш
                 st.session_state.uploaded_files_cache[file_key] = image_info
                 processed_images.append(image_info)
                 
@@ -489,19 +470,42 @@ def process_uploaded_files(uploaded_files):
     
     return processed_images
 
+def check_mobile_device():
+    """Проверяет, запущено ли приложение на мобильном устройстве"""
+    try:
+        if st._is_running_with_streamlit:
+            # Проверяем user agent через JavaScript
+            mobile_js = """
+            <script>
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+            if (isMobile) {
+                document.body.classList.add('mobile-device');
+            }
+            </script>
+            """
+            st.components.v1.html(mobile_js, height=0)
+    except:
+        pass
+    return False
+
 def main():
     """Основная функция Streamlit приложения"""
     
-    # Настройка страницы
     st.set_page_config(
         page_title="Генератор изображений Yes Ai",
         page_icon="🎨",
-        layout="wide"
+        layout="wide",
+        initial_sidebar_state="auto"  # Адаптируется под мобильные
     )
     
-    # Заголовок
+    # Проверяем мобильное устройство
+    check_mobile_device()
+    
     st.title("🎨 Генератор изображений на базе Yes Ai")
     st.markdown("---")
+    
+    # Загружаем сохраненное состояние
+    saved_state = load_state_from_file()
     
     # Инициализация session state
     if 'generator' not in st.session_state:
@@ -514,25 +518,37 @@ def main():
         st.session_state.processing = False
     
     if 'last_result_path' not in st.session_state:
-        st.session_state.last_result_path = None
+        if saved_state and saved_state.get('last_result_path'):
+            if os.path.exists(saved_state['last_result_path']):
+                st.session_state.last_result_path = saved_state['last_result_path']
+            else:
+                st.session_state.last_result_path = None
+        else:
+            st.session_state.last_result_path = None
     
     if 'last_result_url' not in st.session_state:
-        st.session_state.last_result_url = None
+        st.session_state.last_result_url = saved_state.get('last_result_url') if saved_state else None
     
     if 'task_id' not in st.session_state:
-        st.session_state.task_id = None
+        st.session_state.task_id = saved_state.get('task_id') if saved_state else None
     
     if 'customer_id' not in st.session_state:
-        st.session_state.customer_id = str(uuid.uuid4())[:8]
+        st.session_state.customer_id = saved_state.get('customer_id', str(uuid.uuid4())[:8]) if saved_state else str(uuid.uuid4())[:8]
     
     if 'uploaded_files_cache' not in st.session_state:
         st.session_state.uploaded_files_cache = {}
     
     if 'current_prompt' not in st.session_state:
-        st.session_state.current_prompt = ""
+        st.session_state.current_prompt = saved_state.get('current_prompt', '') if saved_state else ''
     
     if 'toggle_states' not in st.session_state:
-        st.session_state.toggle_states = {
+        st.session_state.toggle_states = saved_state.get('toggle_states', {
+            'price_tags': False,
+            'random_angle': False,
+            'messy_shelf': False,
+            'professional_arrangement': False,
+            'auto_fix': False
+        }) if saved_state else {
             'price_tags': False,
             'random_angle': False,
             'messy_shelf': False,
@@ -541,64 +557,69 @@ def main():
         }
     
     if 'generation_completed' not in st.session_state:
-        st.session_state.generation_completed = False
+        st.session_state.generation_completed = saved_state.get('generation_completed', False) if saved_state else False
     
     # Боковая панель с информацией
     with st.sidebar:
         st.header("ℹ️ Информация")
+        
+        # Предупреждение для мобильных
+        st.markdown("""
+        <style>
+        .mobile-warning {
+            background-color: #fff3cd;
+            color: #856404;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+        
+        st.markdown('<div class="mobile-warning">📱 Если вы на мобильном устройстве, процесс может быть медленнее. Пожалуйста, не закрывайте приложение.</div>', unsafe_allow_html=True)
+        
         st.markdown(f"""
         **ID клиента:** `{st.session_state.customer_id}`
         
         **Как это работает:**
         1. Загрузите до 10 изображений
-        2. Напишите промпт (описание желаемого результата)
-        3. Настройте параметры генерации с помощью ползунков
+        2. Напишите промпт
+        3. Настройте параметры
         4. Нажмите "Сгенерировать"
         5. Подождите 30-60 секунд
         
-        **Особенности:**
-        • Изображения кэшируются - не загружаются повторно
-        • До 10 референсных изображений
-        • Нейросеть Nano Banana 2
-        • Формат: 9:16
+        **Статус:** 📎 {len(st.session_state.uploaded_images)}/10 изображений
         """)
         
-        st.markdown("---")
-        st.markdown("**Статус:**")
-        st.info(f"📎 Загружено изображений: {len(st.session_state.uploaded_images)}/10")
-        
-        # Кнопка очистки кэша
-        if st.button("🗑️ Очистить кэш изображений", use_container_width=True):
-            try:
-                # Очищаем кэш в session_state
-                st.session_state.uploaded_files_cache = {}
-                st.session_state.uploaded_images = []
-                st.session_state.last_result_path = None
-                st.session_state.last_result_url = None
-                st.session_state.generation_completed = False
-                
-                # Удаляем файлы
-                for filename in os.listdir(IMAGES_FOLDER):
-                    filepath = os.path.join(IMAGES_FOLDER, filename)
-                    if os.path.isfile(filepath):
-                        os.remove(filepath)
-                st.success("✅ Кэш очищен")
+        # Кнопка восстановления последнего результата
+        if st.session_state.last_result_path and os.path.exists(st.session_state.last_result_path):
+            if st.button("🔄 Показать последний результат", use_container_width=True):
+                st.session_state.generation_completed = True
                 st.rerun()
-            except Exception as e:
-                st.error(f"Ошибка при очистке: {e}")
         
-        # Кнопка сброса ID клиента
-        if st.button("🔄 Новый ID клиента", use_container_width=True):
-            st.session_state.customer_id = str(uuid.uuid4())[:8]
+        # Кнопка очистки
+        if st.button("🗑️ Очистить всё", use_container_width=True):
+            st.session_state.uploaded_files_cache = {}
+            st.session_state.uploaded_images = []
+            st.session_state.last_result_path = None
+            st.session_state.last_result_url = None
+            st.session_state.generation_completed = False
+            if os.path.exists(STATE_FILE):
+                os.remove(STATE_FILE)
+            for filename in os.listdir(IMAGES_FOLDER):
+                filepath = os.path.join(IMAGES_FOLDER, filename)
+                if os.path.isfile(filepath):
+                    os.remove(filepath)
+            st.success("✅ Всё очищено")
             st.rerun()
     
     # Основная область
     col1, col2 = st.columns([3, 2])
     
     with col1:
-        st.subheader("📤 Загрузка изображений (до 10 шт.)")
+        st.subheader("📤 Загрузка изображений")
         
-        # Загрузка файлов
         uploaded_files = st.file_uploader(
             "Выберите изображения",
             type=['png', 'jpg', 'jpeg', 'gif', 'webp'],
@@ -607,28 +628,24 @@ def main():
             disabled=st.session_state.processing
         )
         
-        # Обработка загруженных файлов (только если есть новые файлы)
         if uploaded_files and not st.session_state.processing:
-            # Проверяем, изменились ли файлы
             current_files_key = str([(f.name, f.size) for f in uploaded_files])
             
             if 'last_files_key' not in st.session_state or st.session_state.last_files_key != current_files_key:
                 st.session_state.last_files_key = current_files_key
                 st.session_state.uploaded_images = process_uploaded_files(uploaded_files)
-                # Сбрасываем результат при загрузке новых изображений
                 st.session_state.last_result_path = None
                 st.session_state.last_result_url = None
                 st.session_state.generation_completed = False
                 
                 if st.session_state.uploaded_images:
-                    st.success(f"✅ Успешно загружено {len(st.session_state.uploaded_images)} изображений")
+                    st.success(f"✅ Загружено {len(st.session_state.uploaded_images)} изображений")
         
-        # Отображение загруженных изображений
         if st.session_state.uploaded_images:
-            st.subheader("🖼️ Загруженные изображения")
+            st.subheader("🖼️ Превью")
             
-            # Создаем сетку для превью
-            cols_per_row = 5
+            # Адаптивная сетка для мобильных
+            cols_per_row = 3 if check_mobile_device() else 5
             rows = (len(st.session_state.uploaded_images) + cols_per_row - 1) // cols_per_row
             
             for row in range(rows):
@@ -638,114 +655,79 @@ def main():
                     if img_idx < len(st.session_state.uploaded_images):
                         img_data = st.session_state.uploaded_images[img_idx]
                         with cols[col_idx]:
-                            st.image(
-                                img_data["thumbnail"],
-                                caption=f"{img_idx + 1}. {img_data['name'][:10]}...",
-                                use_column_width=True
-                            )
-                            st.caption(f"✅ Загружено")
-            
-            # Кнопка очистки
-            if st.button("🗑️ Очистить все изображения", disabled=st.session_state.processing):
-                st.session_state.uploaded_images = []
-                st.session_state.uploaded_files_cache = {}
-                st.session_state.last_result_path = None
-                st.session_state.last_result_url = None
-                st.session_state.generation_completed = False
-                st.rerun()
+                            st.image(img_data["thumbnail"], use_column_width=True)
+                            st.caption(f"{img_idx + 1}")
     
     with col2:
         st.subheader("📝 Промпт и настройки")
         
-        # Поле для ввода промпта
         base_prompt = st.text_area(
-            "Введите базовое описание (необязательно):",
+            "Описание (необязательно):",
             value=st.session_state.current_prompt,
             height=80,
-            placeholder="Например: фотография полки с продуктами... (можно оставить пустым)",
+            placeholder="Например: полка с продуктами...",
             disabled=st.session_state.processing or len(st.session_state.uploaded_images) == 0,
             key="base_prompt_input"
         )
         
-        # Обновляем промпт в session state
         if base_prompt != st.session_state.current_prompt:
             st.session_state.current_prompt = base_prompt
         
-        st.markdown("### 🎛️ Настройки генерации")
-        st.markdown("*Включите нужные опции для модификации промпта*")
+        st.markdown("### 🎛️ Настройки")
         
-        # Создаем колонки для ползунков
         toggle_col1, toggle_col2 = st.columns(2)
         
         with toggle_col1:
             price_tags = st.toggle(
-                "🏷️ Добавить ценники", 
+                "🏷️ Ценники", 
                 value=st.session_state.toggle_states['price_tags'],
-                key="toggle_price_tags",
-                help="Добавляет к промпту: 'add price tags to all products'"
+                key="toggle_price_tags"
             )
-            
             random_angle = st.toggle(
-                "🔄 Случайный ракурс", 
+                "🔄 Случ. ракурс", 
                 value=st.session_state.toggle_states['random_angle'],
-                key="toggle_random_angle",
-                help="Добавляет к промпту: 'поменять случайно ракурс'"
+                key="toggle_random_angle"
             )
-            
             messy_shelf = st.toggle(
-                "📦 Неопрятная полка", 
+                "📦 Неопрятно", 
                 value=st.session_state.toggle_states['messy_shelf'],
-                key="toggle_messy_shelf",
-                help="Добавляет к промпту: 'make shelf look messy after shopping'"
+                key="toggle_messy_shelf"
             )
         
         with toggle_col2:
-            professional_arrangement = st.toggle(
-                "✨ Профессиональная выкладка", 
+            professional = st.toggle(
+                "✨ Профессионально", 
                 value=st.session_state.toggle_states['professional_arrangement'],
-                key="toggle_professional",
-                help="Добавляет к промпту: 'make shelf look professionally arranged'"
+                key="toggle_professional"
             )
-            
             auto_fix = st.toggle(
-                "🔧 Автоисправление", 
+                "🔧 Авто", 
                 value=st.session_state.toggle_states['auto_fix'],
-                key="toggle_autofix",
-                help="Добавляет к промпту: 'make shelf look professionally arranged'"
+                key="toggle_autofix"
             )
         
-        # Обновляем состояния тумблеров в session state
         st.session_state.toggle_states = {
             'price_tags': price_tags,
             'random_angle': random_angle,
             'messy_shelf': messy_shelf,
-            'professional_arrangement': professional_arrangement,
+            'professional_arrangement': professional,
             'auto_fix': auto_fix
         }
         
-        st.markdown("---")
-        
-        # Строим финальный промпт
         final_prompt = build_prompt(st.session_state.current_prompt, st.session_state.toggle_states)
         
-        # Отображаем финальный промпт
         if final_prompt:
-            st.info(f"📝 **Финальный промпт:**\n{final_prompt}")
-        else:
-            st.warning("⚠️ Промпт пуст. Будут использованы только настройки.")
+            st.info(f"📝 **Промпт:** {final_prompt[:100]}{'...' if len(final_prompt) > 100 else ''}")
         
         # Кнопка генерации
         generate_button = st.button(
             "🚀 Сгенерировать",
             type="primary",
             use_container_width=True,
-            disabled=(
-                st.session_state.processing or 
-                len(st.session_state.uploaded_images) == 0
-            )
+            disabled=st.session_state.processing or len(st.session_state.uploaded_images) == 0
         )
         
-        # Область для результата и статуса
+        # Области для результатов
         result_placeholder = st.empty()
         status_placeholder = st.empty()
         
@@ -756,20 +738,17 @@ def main():
             st.session_state.generation_completed = False
             
             try:
-                # Извлекаем URL изображений
                 references_urls = [img["url"] for img in st.session_state.uploaded_images if "url" in img]
                 
                 if not references_urls:
-                    st.error("❌ Нет доступных URL изображений")
+                    st.error("❌ Нет URL изображений")
                     st.session_state.processing = False
                     return
                 
-                # Показываем прогресс
                 with status_placeholder.container():
                     status_text = st.empty()
-                    status_text.info(f"🔄 Отправка запроса в API Yes Ai...")
+                    status_text.info(f"🔄 Отправка запроса...")
                 
-                # Отправляем запрос на генерацию
                 gen_result = st.session_state.generator.generate_multi_image(
                     final_prompt, 
                     references_urls, 
@@ -783,23 +762,19 @@ def main():
                         
                         with status_placeholder.container():
                             progress_text = st.empty()
-                            progress_text.info(f"🆔 ID задачи: `{api_task_id}`\n\n⏳ Ожидание результата... Это может занять 30-60 секунд")
+                            progress_text.info(f"🆔 ID: {api_task_id}\n\n⏳ Ожидание... 30-60 сек")
                         
-                        # Получаем результат
                         task_result = st.session_state.generator.get_task_result(api_task_id, max_attempts=30, wait_time=5)
                         
                         if task_result:
-                            logger.info(f"Результат задачи: {task_result}")
-                            
                             if task_result.get("status") == "success":
                                 image_url = task_result.get("image_url")
                                 
                                 if image_url:
                                     st.session_state.last_result_url = image_url
                                     
-                                    # Скачиваем и сохраняем изображение локально
                                     with status_placeholder.container():
-                                        status_text.info(f"📥 Скачивание изображения...")
+                                        status_text.info(f"📥 Скачивание...")
                                     
                                     local_path = st.session_state.generator.download_and_save_image(image_url)
                                     
@@ -807,70 +782,60 @@ def main():
                                         st.session_state.last_result_path = local_path
                                         st.session_state.generation_completed = True
                                         
-                                        # Очищаем статус
+                                        # Сохраняем состояние
+                                        save_state_to_file()
+                                        
                                         status_placeholder.empty()
                                         
-                                        # Отображаем результат
                                         with result_placeholder.container():
-                                            st.success("✅ Генерация завершена!")
-                                            st.image(local_path, caption="Результат", use_column_width=True)
+                                            st.success("✅ Готово!")
+                                            st.image(local_path, use_column_width=True)
                                             
-                                            # Кнопка для скачивания
                                             with open(local_path, "rb") as file:
                                                 st.download_button(
-                                                    label="📥 Скачать изображение",
+                                                    label="📥 Скачать",
                                                     data=file,
-                                                    file_name=f"generated_{uuid.uuid4()}.jpg",
+                                                    file_name=f"generated.jpg",
                                                     mime="image/jpeg",
                                                     use_container_width=True
                                                 )
-                                            
-                                            st.caption(f"🆔 ID задачи: {api_task_id}")
-                                            st.caption(f"🔗 URL: {image_url}")
                                     else:
-                                        st.error("❌ Не удалось сохранить изображение локально")
+                                        st.error("❌ Ошибка сохранения")
                                 else:
-                                    st.error("❌ Не получен URL изображения")
+                                    st.error("❌ Нет URL")
                             else:
-                                error_msg = task_result.get("error", "Неизвестная ошибка")
-                                st.error(f"❌ Ошибка генерации: {error_msg}")
+                                st.error(f"❌ Ошибка: {task_result.get('error', 'Неизвестно')}")
                         else:
-                            st.error("❌ Не удалось получить результат генерации")
+                            st.error("❌ Нет результата")
                     else:
-                        st.error(f"❌ Ошибка API: {gen_result}")
+                        st.error(f"❌ Ошибка API")
                 else:
-                    error_msg = gen_result.get("message", gen_result.get("error", "Неизвестная ошибка")) if gen_result else "Ошибка подключения"
-                    st.error(f"❌ Ошибка при генерации: {error_msg}")
+                    error_msg = gen_result.get("message", "Неизвестная ошибка") if gen_result else "Ошибка"
+                    st.error(f"❌ {error_msg}")
                 
             except Exception as e:
-                st.error(f"❌ Произошла ошибка: {str(e)}")
-                logger.error(f"Ошибка генерации: {e}", exc_info=True)
+                st.error(f"❌ Ошибка: {str(e)}")
+                logger.error(f"Ошибка: {e}", exc_info=True)
             
             finally:
                 st.session_state.processing = False
                 st.rerun()
         
-        # Если генерация завершена и есть результат, показываем его
+        # Показываем последний результат
         elif st.session_state.generation_completed and st.session_state.last_result_path:
             if os.path.exists(st.session_state.last_result_path):
                 with result_placeholder.container():
-                    st.subheader("🎨 Последний результат")
-                    st.image(st.session_state.last_result_path, caption="Результат", use_column_width=True)
+                    st.subheader("🎨 Результат")
+                    st.image(st.session_state.last_result_path, use_column_width=True)
                     
                     with open(st.session_state.last_result_path, "rb") as file:
                         st.download_button(
-                            label="📥 Скачать изображение",
+                            label="📥 Скачать",
                             data=file,
-                            file_name=f"generated_{uuid.uuid4()}.jpg",
+                            file_name=f"generated.jpg",
                             mime="image/jpeg",
                             use_container_width=True
                         )
-                    
-                    if st.session_state.task_id:
-                        st.caption(f"🆔 ID задачи: {st.session_state.task_id}")
-                    
-                    if st.session_state.last_result_url:
-                        st.caption(f"🔗 URL: {st.session_state.last_result_url}")
 
 if __name__ == "__main__":
     main()
