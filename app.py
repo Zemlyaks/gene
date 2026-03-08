@@ -45,7 +45,6 @@ def save_state_to_file():
             'timestamp': datetime.now().isoformat()
         }
         
-        # Всегда сохраняем состояние, даже если нет результата
         with open(STATE_FILE, 'w') as f:
             json.dump(state, f)
         logger.info(f"Состояние сохранено в файл")
@@ -59,9 +58,8 @@ def load_state_from_file():
             with open(STATE_FILE, 'r') as f:
                 state = json.load(f)
             
-            # Проверяем, не устарело ли состояние (больше 1 часа)
             timestamp = datetime.fromisoformat(state.get('timestamp', '2000-01-01'))
-            if (datetime.now() - timestamp).seconds < 3600:  # 1 час
+            if (datetime.now() - timestamp).seconds < 3600:
                 logger.info(f"Состояние загружено из файла")
                 return state
             else:
@@ -83,9 +81,6 @@ class FreeImageUploader:
         try:
             if not filename:
                 filename = f"image_{uuid.uuid4().hex[:8]}.jpg"
-            
-            if len(image_bytes) > 10 * 1024 * 1024:
-                logger.warning(f"Изображение большое ({len(image_bytes)/1024/1024:.1f} МБ)")
             
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
             
@@ -200,19 +195,21 @@ class ImageGenerator:
                     if status == 2 and result_url:
                         return {
                             "status": "success",
-                            "image_url": result_url
+                            "image_url": result_url,
+                            "completed": True  # Флаг завершения
                         }
                     elif status == 3:
                         return {
-                            "status": "failed",
-                            "error": data.get('comment_ru') or "Ошибка генерации"
+                            "status": "failed", 
+                            "error": data.get('comment_ru') or "Ошибка генерации",
+                            "completed": True
                         }
                 
                 if attempt == max_attempts - 1:
-                    return {"status": "timeout", "error": "Превышено время ожидания"}
+                    return {"status": "timeout", "error": "Превышено время ожидания", "completed": True}
                     
         except Exception as e:
-            return {"status": "error", "error": str(e)}
+            return {"status": "error", "error": str(e), "completed": True}
     
     def download_and_save_image(self, image_url: str) -> Optional[str]:
         """Скачивает изображение по URL и сохраняет локально"""
@@ -223,7 +220,7 @@ class ImageGenerator:
             if response.status_code != 200:
                 return None
             
-            filename = f"{uuid.uuid4()}.png"  # Используем PNG для сохранения качества
+            filename = f"{uuid.uuid4()}.png"
             filepath = os.path.join(IMAGES_FOLDER, filename)
             
             with open(filepath, 'wb') as f:
@@ -337,10 +334,10 @@ def main():
         layout="wide"
     )
     
-    # Загружаем сохраненное состояние ПЕРВЫМ делом
+    # Загружаем сохраненное состояние
     saved_state = load_state_from_file()
     
-    # Инициализация session state с приоритетом сохраненного состояния
+    # Инициализация session state
     if 'generator' not in st.session_state:
         st.session_state.generator = ImageGenerator()
     
@@ -350,7 +347,9 @@ def main():
     if 'processing' not in st.session_state:
         st.session_state.processing = False
     
-    # Загружаем результат из сохраненного состояния, если он есть
+    if 'generation_started' not in st.session_state:
+        st.session_state.generation_started = False  # Новый флаг для отслеживания начала генерации
+    
     if 'last_result_path' not in st.session_state:
         if saved_state and saved_state.get('last_result_path'):
             if os.path.exists(saved_state['last_result_path']):
@@ -403,7 +402,13 @@ def main():
         st.markdown(f"ID: `{st.session_state.customer_id}`")
         st.markdown(f"📎 {len(st.session_state.uploaded_images)}/10 изображений")
         
-        # Кнопка показа результата (всегда доступна, если есть результат)
+        # Индикатор статуса генерации
+        if st.session_state.processing:
+            st.warning("⏳ Идет генерация...")
+        elif st.session_state.generation_completed:
+            st.success("✅ Генерация завершена")
+        
+        # Кнопка показа результата
         if st.session_state.last_result_path and os.path.exists(st.session_state.last_result_path):
             if st.button("🖼️ Показать результат", use_container_width=True):
                 st.session_state.generation_completed = True
@@ -416,6 +421,8 @@ def main():
             st.session_state.last_result_url = None
             st.session_state.generation_completed = False
             st.session_state.task_id = None
+            st.session_state.processing = False
+            st.session_state.generation_started = False
             if os.path.exists(STATE_FILE):
                 os.remove(STATE_FILE)
             for filename in os.listdir(IMAGES_FOLDER):
@@ -436,7 +443,7 @@ def main():
             type=['png', 'jpg', 'jpeg', 'gif', 'webp'],
             accept_multiple_files=True,
             key="file_uploader",
-            disabled=st.session_state.processing
+            disabled=st.session_state.processing  # Блокируем во время генерации
         )
         
         if uploaded_files and not st.session_state.processing:
@@ -447,7 +454,6 @@ def main():
                 new_images = process_uploaded_files(uploaded_files)
                 if new_images:
                     st.session_state.uploaded_images = new_images
-                    # Не сбрасываем результат при загрузке новых изображений
                     st.success(f"✅ Загружено {len(new_images)} изображений")
         
         # Превью загруженных изображений
@@ -474,19 +480,19 @@ def main():
         
         if base_prompt != st.session_state.current_prompt:
             st.session_state.current_prompt = base_prompt
-            save_state_to_file()  # Сохраняем при изменении
+            save_state_to_file()
         
         # Тумблеры
         st.markdown("### 🎛️ Параметры")
         
         col_t1, col_t2 = st.columns(2)
         with col_t1:
-            price_tags = st.toggle("🏷️ Ценники", value=st.session_state.toggle_states['price_tags'], key="t1")
-            random_angle = st.toggle("🔄 Ракурс", value=st.session_state.toggle_states['random_angle'], key="t2")
-            messy_shelf = st.toggle("📦 Неопрятно", value=st.session_state.toggle_states['messy_shelf'], key="t3")
+            price_tags = st.toggle("🏷️ Ценники", value=st.session_state.toggle_states['price_tags'], key="t1", disabled=st.session_state.processing)
+            random_angle = st.toggle("🔄 Ракурс", value=st.session_state.toggle_states['random_angle'], key="t2", disabled=st.session_state.processing)
+            messy_shelf = st.toggle("📦 Неопрятно", value=st.session_state.toggle_states['messy_shelf'], key="t3", disabled=st.session_state.processing)
         with col_t2:
-            professional = st.toggle("✨ Профессионально", value=st.session_state.toggle_states['professional_arrangement'], key="t4")
-            auto_fix = st.toggle("🔧 Авто", value=st.session_state.toggle_states['auto_fix'], key="t5")
+            professional = st.toggle("✨ Профессионально", value=st.session_state.toggle_states['professional_arrangement'], key="t4", disabled=st.session_state.processing)
+            auto_fix = st.toggle("🔧 Авто", value=st.session_state.toggle_states['auto_fix'], key="t5", disabled=st.session_state.processing)
         
         # Обновляем состояния
         new_toggle_states = {
@@ -499,7 +505,7 @@ def main():
         
         if new_toggle_states != st.session_state.toggle_states:
             st.session_state.toggle_states = new_toggle_states
-            save_state_to_file()  # Сохраняем при изменении
+            save_state_to_file()
         
         # Финальный промпт
         final_prompt = build_prompt(st.session_state.current_prompt, st.session_state.toggle_states)
@@ -507,7 +513,7 @@ def main():
             st.info(f"📝 {final_prompt[:100]}{'...' if len(final_prompt) > 100 else ''}")
         
         # Кнопка генерации
-        can_generate = len(st.session_state.uploaded_images) > 0 and not st.session_state.processing
+        can_generate = len(st.session_state.uploaded_images) > 0 and not st.session_state.processing and not st.session_state.generation_started
         generate_button = st.button(
             "🚀 Сгенерировать",
             type="primary",
@@ -515,10 +521,10 @@ def main():
             disabled=not can_generate
         )
         
-        # Область для результата (ВАЖНО: всегда показываем, если есть результат)
+        # Область для результата
         result_placeholder = st.empty()
         
-        # ЕСЛИ ЕСТЬ РЕЗУЛЬТАТ - ПОКАЗЫВАЕМ ЕГО СРАЗУ
+        # Если есть результат - показываем его
         if st.session_state.generation_completed and st.session_state.last_result_path:
             if os.path.exists(st.session_state.last_result_path):
                 with result_placeholder.container():
@@ -534,21 +540,22 @@ def main():
                             use_container_width=True
                         )
         
-        # Область для статуса (только во время генерации)
+        # Область для статуса
         status_placeholder = st.empty()
         
         # Обработка генерации
-        if generate_button and not st.session_state.processing:
+        if generate_button and not st.session_state.processing and not st.session_state.generation_started:
             st.session_state.processing = True
+            st.session_state.generation_started = True
             st.session_state.task_id = None
-            # НЕ сбрасываем generation_completed здесь
             
             try:
                 references_urls = [img["url"] for img in st.session_state.uploaded_images if "url" in img]
                 
                 if not references_urls:
-                    st.error("❌ Нет URL изображений")
+                    status_placeholder.error("❌ Нет URL изображений")
                     st.session_state.processing = False
+                    st.session_state.generation_started = False
                     return
                 
                 status_placeholder.info("🔄 Отправка запроса...")
@@ -570,47 +577,65 @@ def main():
                         # Получаем результат
                         task_result = st.session_state.generator.get_task_result(api_task_id, max_attempts=30, wait_time=5)
                         
-                        if task_result and task_result.get("status") == "success":
-                            image_url = task_result.get("image_url")
-                            
-                            if image_url:
-                                st.session_state.last_result_url = image_url
-                                status_placeholder.info("📥 Скачивание...")
-                                save_state_to_file()
+                        # Проверяем, что задача действительно завершена
+                        if task_result and task_result.get("completed", False):
+                            if task_result.get("status") == "success":
+                                image_url = task_result.get("image_url")
                                 
-                                local_path = st.session_state.generator.download_and_save_image(image_url)
-                                
-                                if local_path:
-                                    st.session_state.last_result_path = local_path
-                                    st.session_state.generation_completed = True
-                                    
-                                    # Сохраняем состояние
+                                if image_url:
+                                    st.session_state.last_result_url = image_url
+                                    status_placeholder.info("📥 Скачивание...")
                                     save_state_to_file()
                                     
-                                    # Очищаем статус и показываем результат
-                                    status_placeholder.empty()
-                                    st.rerun()  # Перезапускаем для отображения результата
+                                    local_path = st.session_state.generator.download_and_save_image(image_url)
+                                    
+                                    if local_path:
+                                        st.session_state.last_result_path = local_path
+                                        st.session_state.generation_completed = True
+                                        
+                                        # Сохраняем состояние
+                                        save_state_to_file()
+                                        
+                                        # Очищаем статус
+                                        status_placeholder.empty()
+                                        
+                                        # Сбрасываем флаги генерации
+                                        st.session_state.processing = False
+                                        st.session_state.generation_started = False
+                                        
+                                        # Показываем результат
+                                        st.rerun()
+                                    else:
+                                        status_placeholder.error("❌ Ошибка сохранения")
+                                        st.session_state.processing = False
+                                        st.session_state.generation_started = False
                                 else:
-                                    status_placeholder.error("❌ Ошибка сохранения")
+                                    status_placeholder.error("❌ Нет URL")
+                                    st.session_state.processing = False
+                                    st.session_state.generation_started = False
                             else:
-                                status_placeholder.error("❌ Нет URL")
-                        elif task_result:
-                            status_placeholder.error(f"❌ {task_result.get('error', 'Ошибка')}")
+                                status_placeholder.error(f"❌ {task_result.get('error', 'Ошибка')}")
+                                st.session_state.processing = False
+                                st.session_state.generation_started = False
                         else:
-                            status_placeholder.error("❌ Нет результата")
+                            status_placeholder.error("❌ Задача не завершена")
+                            st.session_state.processing = False
+                            st.session_state.generation_started = False
                     else:
                         status_placeholder.error("❌ Ошибка API")
+                        st.session_state.processing = False
+                        st.session_state.generation_started = False
                 else:
                     error_msg = gen_result.get("message", "Ошибка") if gen_result else "Ошибка"
                     status_placeholder.error(f"❌ {error_msg}")
+                    st.session_state.processing = False
+                    st.session_state.generation_started = False
                 
             except Exception as e:
                 status_placeholder.error(f"❌ Ошибка: {str(e)}")
                 logger.error(f"Ошибка: {e}")
-            
-            finally:
                 st.session_state.processing = False
-                # НЕ вызываем st.rerun() здесь, чтобы не сбрасывать результат
+                st.session_state.generation_started = False
 
 if __name__ == "__main__":
     main()
