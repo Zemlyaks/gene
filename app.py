@@ -148,7 +148,7 @@ class ImageGenerator:
             return {"error": "no_valid_images", "message": "Ни одно из изображений недоступно"}
         
         data = {
-            "version": "v.2",
+            "version": "v.1.pro",
             "prompt": prompt,
             "style": "0",
             "dimensions": "9:16",
@@ -238,11 +238,11 @@ class ImageGenerator:
 def build_prompt(base_prompt: str, toggles: dict) -> str:
     """Строит финальный промпт"""
     toggle_texts = {
-        'price_tags': "add price tags to all products",
-        'random_angle': "поменять случайно ракурс",
-        'messy_shelf': "make shelf look messy after shopping",
-        'professional_arrangement': "make shelf look professionally arranged",
-        'auto_fix': "make shelf look professionally arranged"
+        'price_tags': "проанализируй картинку, это стеллаж с товарами, посмотри где не хватает ценников под товаром, помести туда ценник, исходя из соседних ценников",
+        'random_angle': "поменяй случайно ракурс фотографии, учитывай что эту фотографию делает человек и ракурс не может быть слишком высоким или слишком низким",
+        'messy_shelf': "проанализируй картинку, это стеллаж с товарами, представь что в течение дня покупатели взаимодействовали с этой полкой, случайным образом убери часть товаров",
+        'professional_arrangement': "проанализируй картинку, это стеллаж с товарами, представь что пришел мерчендайзер и выставил все товары, которых не хватало, добавил ценники, которых не хватало",
+        'auto_fix': "проанализируй картинку, это стеллаж с товарами, сделай профессиональную выкладку товаров на полках"
     }
     
     active_texts = []
@@ -639,3 +639,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
