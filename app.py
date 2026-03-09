@@ -239,7 +239,7 @@ def build_prompt(base_prompt: str, toggles: dict) -> str:
     """Строит финальный промпт"""
     toggle_texts = {
         'price_tags': "проанализируй картинку, это стеллаж с товарами, посмотри где не хватает ценников под товаром, помести туда ценник, исходя из соседних ценников",
-        'random_angle': "поменяй случайно ракурс фотографии, учитывай что эту фотографию делает человек и ракурс не может быть слишком высоким или слишком низким",
+        'random_angle': "поменяй случайно ракурс фотографии, учитывай что эту фотографию делает человек и ракурс не может быть слишком высоким или слишком низким, так же учитывай что товары и ценники должны быть хорошо видны",
         'messy_shelf': "проанализируй картинку, это стеллаж с товарами, представь что в течение дня покупатели взаимодействовали с этой полкой, случайным образом убери часть товаров",
         'professional_arrangement': "проанализируй картинку, это стеллаж с товарами, представь что пришел мерчендайзер и выставил все товары, которых не хватало, добавил ценники, которых не хватало",
         'auto_fix': "проанализируй картинку, это стеллаж с товарами, сделай профессиональную выкладку товаров на полках"
@@ -334,10 +334,10 @@ def main():
         layout="wide"
     )
     
-    # Загружаем сохраненное состояние (всегда загружаем, но с проверкой)
+    # Загружаем сохраненное состояние
     saved_state = load_state_from_file()
     
-    # Инициализация session state (ВСЕГДА инициализируем, если ключи отсутствуют)
+    # Инициализация session state
     if 'generator' not in st.session_state:
         st.session_state.generator = ImageGenerator()
     
@@ -350,7 +350,10 @@ def main():
     if 'generation_started' not in st.session_state:
         st.session_state.generation_started = False
     
-    # Загружаем результаты из сохраненного состояния (только если они еще не установлены)
+    if 'stop_generation' not in st.session_state:
+        st.session_state.stop_generation = False  # Новый флаг для остановки
+    
+    # Загружаем результаты из сохраненного состояния
     if 'last_result_path' not in st.session_state:
         if saved_state and saved_state.get('last_result_path'):
             if os.path.exists(saved_state['last_result_path']):
@@ -406,6 +409,9 @@ def main():
         # Индикатор статуса генерации
         if st.session_state.processing:
             st.warning("⏳ Идет генерация...")
+            if st.button("⏹️ Остановить генерацию", use_container_width=True):
+                st.session_state.stop_generation = True
+                st.rerun()
         elif st.session_state.generation_completed:
             st.success("✅ Генерация завершена")
         
@@ -425,6 +431,7 @@ def main():
             st.session_state.task_id = None
             st.session_state.processing = False
             st.session_state.generation_started = False
+            st.session_state.stop_generation = False
             
             # Удаляем файл состояния
             if os.path.exists(STATE_FILE):
@@ -457,13 +464,10 @@ def main():
         if uploaded_files:
             current_files_key = str([(f.name, f.size) for f in uploaded_files])
             
-            # Проверяем, изменились ли файлы
             if ('last_files_key' not in st.session_state or 
                 st.session_state.last_files_key != current_files_key):
                 
                 st.session_state.last_files_key = current_files_key
-                
-                # Обрабатываем файлы
                 new_images = process_uploaded_files(uploaded_files)
                 if new_images:
                     st.session_state.uploaded_images = new_images
@@ -472,8 +476,6 @@ def main():
         # Превью загруженных изображений
         if st.session_state.uploaded_images:
             st.subheader("🖼️ Превью")
-            
-            # Создаем сетку для превью
             cols = st.columns(min(len(st.session_state.uploaded_images), 5))
             for i, img_data in enumerate(st.session_state.uploaded_images[:5]):
                 with cols[i]:
@@ -553,7 +555,7 @@ def main():
             st.info(f"📝 {final_prompt[:100]}{'...' if len(final_prompt) > 100 else ''}")
         
         # Кнопка генерации
-        can_generate = len(st.session_state.uploaded_images) > 0 and not st.session_state.processing
+        can_generate = len(st.session_state.uploaded_images) > 0 and not st.session_state.processing and not st.session_state.generation_completed
         generate_button = st.button(
             "🚀 Сгенерировать",
             type="primary",
@@ -584,9 +586,10 @@ def main():
         status_placeholder = st.empty()
         
         # Обработка генерации
-        if generate_button and not st.session_state.processing:
+        if generate_button and not st.session_state.processing and not st.session_state.generation_completed:
             st.session_state.processing = True
             st.session_state.generation_started = True
+            st.session_state.stop_generation = False
             st.session_state.task_id = None
             
             try:
@@ -614,8 +617,21 @@ def main():
                         status_placeholder.info(f"🆔 ID: {api_task_id}\n\n⏳ Ожидание...")
                         save_state_to_file()
                         
-                        # Получаем результат
-                        task_result = st.session_state.generator.get_task_result(api_task_id, max_attempts=30, wait_time=5)
+                        # Получаем результат с проверкой на остановку
+                        task_result = None
+                        for attempt in range(30):
+                            if st.session_state.stop_generation:
+                                status_placeholder.warning("⏹️ Генерация остановлена пользователем")
+                                st.session_state.processing = False
+                                st.session_state.generation_started = False
+                                return
+                            
+                            task_result = st.session_state.generator.get_task_result(api_task_id, max_attempts=1, wait_time=5)
+                            
+                            if task_result and task_result.get("completed", False):
+                                break
+                            
+                            time.sleep(1)
                         
                         if task_result and task_result.get("completed", False):
                             if task_result.get("status") == "success":
@@ -635,10 +651,8 @@ def main():
                                         # Сохраняем состояние
                                         save_state_to_file()
                                         
-                                        # Очищаем статус
+                                        # Очищаем статус и флаги
                                         status_placeholder.empty()
-                                        
-                                        # Сбрасываем флаги генерации
                                         st.session_state.processing = False
                                         st.session_state.generation_started = False
                                         
@@ -657,7 +671,7 @@ def main():
                                 st.session_state.processing = False
                                 st.session_state.generation_started = False
                         else:
-                            status_placeholder.error("❌ Задача не завершена")
+                            status_placeholder.error("❌ Превышено время ожидания")
                             st.session_state.processing = False
                             st.session_state.generation_started = False
                     else:
