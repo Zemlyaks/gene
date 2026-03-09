@@ -151,7 +151,7 @@ class ImageGenerator:
             "version": "v.2",
             "prompt": prompt,
             "style": "0",
-            "dimensions": "9:16",  # Изменено на 9:16
+            "dimensions": "9:16",
             "customer_id": customer_id,
             "references_urls": valid_urls
         }
@@ -167,8 +167,8 @@ class ImageGenerator:
         except Exception as e:
             return {"error": str(e)}
     
-    def get_task_result(self, task_id: str, max_attempts: int = 30, wait_time: int = 5) -> Optional[dict]:
-        """Получает результат задачи по task_id"""
+    def get_task_result(self, task_id: str, max_attempts: int = 60, wait_time: int = 5) -> Optional[dict]:
+        """Получает результат задачи по task_id с увеличенным количеством попыток"""
         try:
             url = f"{API_URL_QUERY_IMAGE}{task_id}"
             
@@ -177,10 +177,12 @@ class ImageGenerator:
                 
                 try:
                     response = requests.get(url, headers=self.headers, timeout=45)
-                except:
+                except Exception as e:
+                    logger.warning(f"Попытка {attempt + 1}: ошибка запроса - {e}")
                     continue
                 
                 if response.status_code != 200:
+                    logger.warning(f"Попытка {attempt + 1}: статус {response.status_code}")
                     continue
                 
                 result = response.json()
@@ -189,8 +191,16 @@ class ImageGenerator:
                     data = result['results']['generation_data']
                     status = data.get('status')
                     result_url = data.get('result_url')
+                    status_description = data.get('status_description', '')
                     
-                    logger.info(f"Попытка {attempt + 1}: статус={status}, result_url={result_url}")
+                    logger.info(f"Попытка {attempt + 1}: статус={status}, описание={status_description}, result_url={result_url}")
+                    
+                    # Статусы API:
+                    # 0 - в очереди
+                    # 1 - в обработке
+                    # 2 - успешно завершено
+                    # 3 - ошибка
+                    # 4 - таймаут
                     
                     if status == 2 and result_url:
                         return {
@@ -199,16 +209,24 @@ class ImageGenerator:
                             "completed": True
                         }
                     elif status == 3:
+                        error_msg = data.get('comment_ru') or data.get('comment_en') or "Ошибка генерации"
                         return {
                             "status": "failed", 
-                            "error": data.get('comment_ru') or "Ошибка генерации",
+                            "error": error_msg,
+                            "completed": True
+                        }
+                    elif status == 4:
+                        return {
+                            "status": "timeout", 
+                            "error": "Таймаут генерации",
                             "completed": True
                         }
                 
                 if attempt == max_attempts - 1:
-                    return {"status": "timeout", "error": "Превышено время ожидания", "completed": True}
+                    return {"status": "timeout", "error": "Превышено максимальное количество попыток", "completed": True}
                     
         except Exception as e:
+            logger.error(f"Ошибка при получении результата: {e}")
             return {"status": "error", "error": str(e), "completed": True}
     
     def download_and_save_image(self, image_url: str) -> Optional[str]:
@@ -218,9 +236,19 @@ class ImageGenerator:
             response = requests.get(image_url, timeout=60)
             
             if response.status_code != 200:
+                logger.error(f"Ошибка скачивания: статус {response.status_code}")
                 return None
             
-            filename = f"{uuid.uuid4()}.png"
+            # Определяем расширение по Content-Type
+            content_type = response.headers.get('Content-Type', '')
+            if 'png' in content_type:
+                ext = 'png'
+            elif 'jpeg' in content_type or 'jpg' in content_type:
+                ext = 'jpg'
+            else:
+                ext = 'png'
+            
+            filename = f"{uuid.uuid4()}.{ext}"
             filepath = os.path.join(IMAGES_FOLDER, filename)
             
             with open(filepath, 'wb') as f:
@@ -237,7 +265,6 @@ class ImageGenerator:
 
 def build_prompt(base_prompt: str, toggles: dict) -> str:
     """Строит финальный промпт"""
-    # Обновленные тексты промптов
     toggle_texts = {
         'price_tags': "проанализируй картинку, это стеллаж с товарами, посмотри где не хватает ценников под товаром, помести туда ценник, исходя из соседних ценников",
         'random_angle': "поменяй случайно ракурс фотографии, учитывай что эту фотографию делает человек и ракурс не может быть слишком высоким или слишком низким, так же учитывай что товары и ценники должны быть хорошо видны",
@@ -255,9 +282,8 @@ def build_prompt(base_prompt: str, toggles: dict) -> str:
         return base_prompt.strip() if base_prompt else ""
     
     if not base_prompt or not base_prompt.strip():
-        return ". ".join(active_texts)  # Объединяем через точку для лучшей читаемости
+        return ". ".join(active_texts)
     
-    # Объединяем базовый промпт с активными текстами
     return f"{base_prompt.strip()}. {' '.join(active_texts)}"
 
 def process_uploaded_files(uploaded_files):
@@ -630,17 +656,23 @@ def main():
                         api_task_id = gen_result['results']['generation_data']['id']
                         st.session_state.task_id = api_task_id
                         
-                        status_placeholder.info(f"🆔 ID: {api_task_id}\n\n⏳ Ожидание...")
+                        status_placeholder.info(f"🆔 ID: {api_task_id}\n\n⏳ Ожидание результата... (обычно 30-60 секунд)")
                         save_state_to_file()
                         
-                        # Получаем результат
+                        # Получаем результат с увеличенным количеством попыток
                         task_result = None
-                        for attempt in range(30):
+                        max_attempts = 60  # Увеличили до 60 попыток
+                        
+                        for attempt in range(max_attempts):
                             if st.session_state.stop_generation:
                                 status_placeholder.warning("⏹️ Генерация остановлена пользователем")
                                 st.session_state.processing = False
                                 st.session_state.generation_started = False
                                 return
+                            
+                            # Обновляем статус каждые 10 попыток
+                            if attempt % 10 == 0 and attempt > 0:
+                                status_placeholder.info(f"🆔 ID: {api_task_id}\n\n⏳ Ожидание... прошло {attempt*5} секунд")
                             
                             task_result = st.session_state.generator.get_task_result(api_task_id, max_attempts=1, wait_time=5)
                             
@@ -655,7 +687,7 @@ def main():
                                 
                                 if image_url:
                                     st.session_state.last_result_url = image_url
-                                    status_placeholder.info("📥 Скачивание...")
+                                    status_placeholder.info("📥 Скачивание изображения...")
                                     save_state_to_file()
                                     
                                     local_path = st.session_state.generator.download_and_save_image(image_url)
@@ -675,27 +707,28 @@ def main():
                                         # Показываем результат
                                         st.rerun()
                                     else:
-                                        status_placeholder.error("❌ Ошибка сохранения")
+                                        status_placeholder.error("❌ Ошибка сохранения изображения")
                                         st.session_state.processing = False
                                         st.session_state.generation_started = False
                                 else:
-                                    status_placeholder.error("❌ Нет URL")
+                                    status_placeholder.error("❌ Не получен URL изображения")
                                     st.session_state.processing = False
                                     st.session_state.generation_started = False
                             else:
-                                status_placeholder.error(f"❌ {task_result.get('error', 'Ошибка')}")
+                                error_msg = task_result.get('error', 'Неизвестная ошибка')
+                                status_placeholder.error(f"❌ Ошибка генерации: {error_msg}")
                                 st.session_state.processing = False
                                 st.session_state.generation_started = False
                         else:
-                            status_placeholder.error("❌ Превышено время ожидания")
+                            status_placeholder.error("❌ Превышено время ожидания (5 минут). Попробуйте снова.")
                             st.session_state.processing = False
                             st.session_state.generation_started = False
                     else:
-                        status_placeholder.error("❌ Ошибка API")
+                        status_placeholder.error("❌ Ошибка API: неверный формат ответа")
                         st.session_state.processing = False
                         st.session_state.generation_started = False
                 else:
-                    error_msg = gen_result.get("message", "Ошибка") if gen_result else "Ошибка"
+                    error_msg = gen_result.get("message", "Неизвестная ошибка") if gen_result else "Ошибка подключения к API"
                     status_placeholder.error(f"❌ {error_msg}")
                     st.session_state.processing = False
                     st.session_state.generation_started = False
