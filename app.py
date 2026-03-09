@@ -161,7 +161,7 @@ class ImageGenerator:
             "version": "v.2",
             "prompt": prompt,
             "style": "0",
-            "dimensions": "9:16",  # Изменено на 9:16
+            "dimensions": "9:16",
             "customer_id": customer_id
         }
         
@@ -231,7 +231,7 @@ class ImageGenerator:
             "version": "v.2",
             "prompt": prompt,
             "style": "0",
-            "dimensions": "9:16",  # Изменено на 9:16
+            "dimensions": "9:16",
             "customer_id": customer_id,
             "references_urls": valid_urls
         }
@@ -756,6 +756,10 @@ def main():
             st.session_state.task_id = None
             st.session_state.generation_completed = False
             
+            # Очищаем предыдущие результаты
+            status_placeholder.empty()
+            result_placeholder.empty()
+            
             try:
                 # Извлекаем URL изображений
                 references_urls = [img["url"] for img in st.session_state.uploaded_images if "url" in img]
@@ -763,7 +767,6 @@ def main():
                 if not references_urls:
                     st.error("❌ Нет доступных URL изображений")
                     st.session_state.processing = False
-                    st.rerun()
                     return
                 
                 # Показываем прогресс
@@ -829,6 +832,9 @@ def main():
                                             
                                             st.caption(f"🆔 ID задачи: {api_task_id}")
                                             st.caption(f"🔗 URL: {image_url}")
+                                        
+                                        # Сбрасываем флаг processing после успешного завершения
+                                        st.session_state.processing = False
                                     else:
                                         st.error("❌ Не удалось сохранить изображение локально")
                                         st.session_state.processing = False
@@ -856,12 +862,13 @@ def main():
                 st.session_state.processing = False
             
             finally:
+                # Если generation_completed уже True, processing уже сброшен
                 if not st.session_state.generation_completed:
                     st.session_state.processing = False
-                    st.rerun()
+                # Не вызываем st.rerun() здесь, чтобы избежать цикла
         
         # Если генерация завершена и есть результат, показываем его
-        elif st.session_state.generation_completed and st.session_state.last_result_path:
+        if st.session_state.generation_completed and st.session_state.last_result_path:
             if os.path.exists(st.session_state.last_result_path):
                 with result_placeholder.container():
                     st.subheader("🎨 Последний результат")
