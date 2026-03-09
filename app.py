@@ -31,6 +31,10 @@ os.makedirs(IMAGES_FOLDER, exist_ok=True)
 # Файл для сохранения состояния
 STATE_FILE = "app_state.json"
 
+# Глобальный кэш для состояния (чтобы избежать множественных загрузок)
+_state_cache = None
+_state_cache_time = 0
+
 def save_state_to_file():
     """Сохраняет важные состояния в файл"""
     try:
@@ -51,8 +55,15 @@ def save_state_to_file():
     except Exception as e:
         logger.error(f"Ошибка при сохранении состояния: {e}")
 
-def load_state_from_file():
-    """Загружает состояние из файла"""
+def load_state_from_file(force=False):
+    """Загружает состояние из файла с кэшированием"""
+    global _state_cache, _state_cache_time
+    
+    # Если есть кэш и не прошло 5 секунд, используем его
+    current_time = time.time()
+    if not force and _state_cache is not None and (current_time - _state_cache_time) < 5:
+        return _state_cache
+    
     try:
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE, 'r') as f:
@@ -61,12 +72,17 @@ def load_state_from_file():
             timestamp = datetime.fromisoformat(state.get('timestamp', '2000-01-01'))
             if (datetime.now() - timestamp).seconds < 3600:
                 logger.info(f"Состояние загружено из файла")
+                _state_cache = state
+                _state_cache_time = current_time
                 return state
             else:
                 logger.info(f"Состояние устарело, удаляем файл")
                 os.remove(STATE_FILE)
+                _state_cache = None
     except Exception as e:
         logger.error(f"Ошибка при загрузке состояния: {e}")
+    
+    _state_cache = None
     return None
 
 class FreeImageUploader:
@@ -196,7 +212,7 @@ class ImageGenerator:
                         return {
                             "status": "success",
                             "image_url": result_url,
-                            "completed": True  # Флаг завершения
+                            "completed": True
                         }
                     elif status == 3:
                         return {
@@ -243,7 +259,7 @@ def build_prompt(base_prompt: str, toggles: dict) -> str:
         'messy_shelf': "проанализируй картинку, это стеллаж с товарами, представь что в течение дня покупатели взаимодействовали с этой полкой, случайным образом убери часть товаров",
         'professional_arrangement': "проанализируй картинку, это стеллаж с товарами, представь что пришел мерчендайзер и выставил все товары, которых не хватало, добавил ценники, которых не хватало",
         'auto_fix': "проанализируй картинку, это стеллаж с товарами, сделай профессиональную выкладку товаров на полках"
-    }
+    }}
     
     active_texts = []
     for toggle_id, is_active in toggles.items():
@@ -334,8 +350,13 @@ def main():
         layout="wide"
     )
     
-    # Загружаем сохраненное состояние
-    saved_state = load_state_from_file()
+    # Проверяем, не было ли уже загружено состояние в этой сессии
+    if 'state_loaded' not in st.session_state:
+        # Загружаем сохраненное состояние только один раз
+        saved_state = load_state_from_file()
+        st.session_state.state_loaded = True
+    else:
+        saved_state = None
     
     # Инициализация session state
     if 'generator' not in st.session_state:
@@ -348,8 +369,9 @@ def main():
         st.session_state.processing = False
     
     if 'generation_started' not in st.session_state:
-        st.session_state.generation_started = False  # Новый флаг для отслеживания начала генерации
+        st.session_state.generation_started = False
     
+    # Загружаем результаты из сохраненного состояния (только если они еще не загружены)
     if 'last_result_path' not in st.session_state:
         if saved_state and saved_state.get('last_result_path'):
             if os.path.exists(saved_state['last_result_path']):
@@ -415,6 +437,7 @@ def main():
                 st.rerun()
         
         if st.button("🗑️ Очистить всё", use_container_width=True):
+            # Очищаем все состояния
             st.session_state.uploaded_files_cache = {}
             st.session_state.uploaded_images = []
             st.session_state.last_result_path = None
@@ -423,12 +446,21 @@ def main():
             st.session_state.task_id = None
             st.session_state.processing = False
             st.session_state.generation_started = False
+            
+            # Удаляем файл состояния
             if os.path.exists(STATE_FILE):
                 os.remove(STATE_FILE)
+            
+            # Очищаем глобальный кэш
+            global _state_cache
+            _state_cache = None
+            
+            # Удаляем сохраненные изображения
             for filename in os.listdir(IMAGES_FOLDER):
                 filepath = os.path.join(IMAGES_FOLDER, filename)
                 if os.path.isfile(filepath):
                     os.remove(filepath)
+            
             st.success("✅ Очищено")
             st.rerun()
     
@@ -443,7 +475,7 @@ def main():
             type=['png', 'jpg', 'jpeg', 'gif', 'webp'],
             accept_multiple_files=True,
             key="file_uploader",
-            disabled=st.session_state.processing  # Блокируем во время генерации
+            disabled=st.session_state.processing
         )
         
         if uploaded_files and not st.session_state.processing:
@@ -577,7 +609,6 @@ def main():
                         # Получаем результат
                         task_result = st.session_state.generator.get_task_result(api_task_id, max_attempts=30, wait_time=5)
                         
-                        # Проверяем, что задача действительно завершена
                         if task_result and task_result.get("completed", False):
                             if task_result.get("status") == "success":
                                 image_url = task_result.get("image_url")
@@ -639,4 +670,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
