@@ -31,10 +31,6 @@ os.makedirs(IMAGES_FOLDER, exist_ok=True)
 # Файл для сохранения состояния
 STATE_FILE = "app_state.json"
 
-# Глобальный кэш для состояния (чтобы избежать множественных загрузок)
-_state_cache = None
-_state_cache_time = 0
-
 def save_state_to_file():
     """Сохраняет важные состояния в файл"""
     try:
@@ -55,15 +51,8 @@ def save_state_to_file():
     except Exception as e:
         logger.error(f"Ошибка при сохранении состояния: {e}")
 
-def load_state_from_file(force=False):
-    """Загружает состояние из файла с кэшированием"""
-    global _state_cache, _state_cache_time
-    
-    # Если есть кэш и не прошло 5 секунд, используем его
-    current_time = time.time()
-    if not force and _state_cache is not None and (current_time - _state_cache_time) < 5:
-        return _state_cache
-    
+def load_state_from_file():
+    """Загружает состояние из файла"""
     try:
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE, 'r') as f:
@@ -72,17 +61,12 @@ def load_state_from_file(force=False):
             timestamp = datetime.fromisoformat(state.get('timestamp', '2000-01-01'))
             if (datetime.now() - timestamp).seconds < 3600:
                 logger.info(f"Состояние загружено из файла")
-                _state_cache = state
-                _state_cache_time = current_time
                 return state
             else:
                 logger.info(f"Состояние устарело, удаляем файл")
                 os.remove(STATE_FILE)
-                _state_cache = None
     except Exception as e:
         logger.error(f"Ошибка при загрузке состояния: {e}")
-    
-    _state_cache = None
     return None
 
 class FreeImageUploader:
@@ -350,15 +334,10 @@ def main():
         layout="wide"
     )
     
-    # Проверяем, не было ли уже загружено состояние в этой сессии
-    if 'state_loaded' not in st.session_state:
-        # Загружаем сохраненное состояние только один раз
-        saved_state = load_state_from_file()
-        st.session_state.state_loaded = True
-    else:
-        saved_state = None
+    # Загружаем сохраненное состояние (всегда загружаем, но с проверкой)
+    saved_state = load_state_from_file()
     
-    # Инициализация session state
+    # Инициализация session state (ВСЕГДА инициализируем, если ключи отсутствуют)
     if 'generator' not in st.session_state:
         st.session_state.generator = ImageGenerator()
     
@@ -371,7 +350,7 @@ def main():
     if 'generation_started' not in st.session_state:
         st.session_state.generation_started = False
     
-    # Загружаем результаты из сохраненного состояния (только если они еще не загружены)
+    # Загружаем результаты из сохраненного состояния (только если они еще не установлены)
     if 'last_result_path' not in st.session_state:
         if saved_state and saved_state.get('last_result_path'):
             if os.path.exists(saved_state['last_result_path']):
@@ -451,10 +430,6 @@ def main():
             if os.path.exists(STATE_FILE):
                 os.remove(STATE_FILE)
             
-            # Очищаем глобальный кэш
-            global _state_cache
-            _state_cache = None
-            
             # Удаляем сохраненные изображения
             for filename in os.listdir(IMAGES_FOLDER):
                 filepath = os.path.join(IMAGES_FOLDER, filename)
@@ -478,11 +453,17 @@ def main():
             disabled=st.session_state.processing
         )
         
-        if uploaded_files and not st.session_state.processing:
+        # Обработка загруженных файлов
+        if uploaded_files:
             current_files_key = str([(f.name, f.size) for f in uploaded_files])
             
-            if 'last_files_key' not in st.session_state or st.session_state.last_files_key != current_files_key:
+            # Проверяем, изменились ли файлы
+            if ('last_files_key' not in st.session_state or 
+                st.session_state.last_files_key != current_files_key):
+                
                 st.session_state.last_files_key = current_files_key
+                
+                # Обрабатываем файлы
                 new_images = process_uploaded_files(uploaded_files)
                 if new_images:
                     st.session_state.uploaded_images = new_images
@@ -491,9 +472,11 @@ def main():
         # Превью загруженных изображений
         if st.session_state.uploaded_images:
             st.subheader("🖼️ Превью")
-            cols = st.columns(5)
+            
+            # Создаем сетку для превью
+            cols = st.columns(min(len(st.session_state.uploaded_images), 5))
             for i, img_data in enumerate(st.session_state.uploaded_images[:5]):
-                with cols[i % 5]:
+                with cols[i]:
                     st.image(img_data["thumbnail"], use_column_width=True)
                     st.caption(f"{i+1}")
     
@@ -519,14 +502,39 @@ def main():
         
         col_t1, col_t2 = st.columns(2)
         with col_t1:
-            price_tags = st.toggle("🏷️ Ценники", value=st.session_state.toggle_states['price_tags'], key="t1", disabled=st.session_state.processing)
-            random_angle = st.toggle("🔄 Ракурс", value=st.session_state.toggle_states['random_angle'], key="t2", disabled=st.session_state.processing)
-            messy_shelf = st.toggle("📦 Неопрятно", value=st.session_state.toggle_states['messy_shelf'], key="t3", disabled=st.session_state.processing)
+            price_tags = st.toggle(
+                "🏷️ Ценники", 
+                value=st.session_state.toggle_states['price_tags'], 
+                key="t1", 
+                disabled=st.session_state.processing
+            )
+            random_angle = st.toggle(
+                "🔄 Ракурс", 
+                value=st.session_state.toggle_states['random_angle'], 
+                key="t2", 
+                disabled=st.session_state.processing
+            )
+            messy_shelf = st.toggle(
+                "📦 Неопрятно", 
+                value=st.session_state.toggle_states['messy_shelf'], 
+                key="t3", 
+                disabled=st.session_state.processing
+            )
         with col_t2:
-            professional = st.toggle("✨ Профессионально", value=st.session_state.toggle_states['professional_arrangement'], key="t4", disabled=st.session_state.processing)
-            auto_fix = st.toggle("🔧 Авто", value=st.session_state.toggle_states['auto_fix'], key="t5", disabled=st.session_state.processing)
+            professional = st.toggle(
+                "✨ Профессионально", 
+                value=st.session_state.toggle_states['professional_arrangement'], 
+                key="t4", 
+                disabled=st.session_state.processing
+            )
+            auto_fix = st.toggle(
+                "🔧 Авто", 
+                value=st.session_state.toggle_states['auto_fix'], 
+                key="t5", 
+                disabled=st.session_state.processing
+            )
         
-        # Обновляем состояния
+        # Обновляем состояния тумблеров
         new_toggle_states = {
             'price_tags': price_tags,
             'random_angle': random_angle,
@@ -545,7 +553,7 @@ def main():
             st.info(f"📝 {final_prompt[:100]}{'...' if len(final_prompt) > 100 else ''}")
         
         # Кнопка генерации
-        can_generate = len(st.session_state.uploaded_images) > 0 and not st.session_state.processing and not st.session_state.generation_started
+        can_generate = len(st.session_state.uploaded_images) > 0 and not st.session_state.processing
         generate_button = st.button(
             "🚀 Сгенерировать",
             type="primary",
@@ -576,7 +584,7 @@ def main():
         status_placeholder = st.empty()
         
         # Обработка генерации
-        if generate_button and not st.session_state.processing and not st.session_state.generation_started:
+        if generate_button and not st.session_state.processing:
             st.session_state.processing = True
             st.session_state.generation_started = True
             st.session_state.task_id = None
@@ -670,4 +678,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
