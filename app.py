@@ -148,10 +148,10 @@ class ImageGenerator:
             return {"error": "no_valid_images", "message": "Ни одно из изображений недоступно"}
         
         data = {
-            "version": "v.1.pro",
+            "version": "v.2",
             "prompt": prompt,
             "style": "0",
-            "dimensions": "9:16",
+            "dimensions": "9:16",  # Изменено на 9:16
             "customer_id": customer_id,
             "references_urls": valid_urls
         }
@@ -237,6 +237,7 @@ class ImageGenerator:
 
 def build_prompt(base_prompt: str, toggles: dict) -> str:
     """Строит финальный промпт"""
+    # Обновленные тексты промптов
     toggle_texts = {
         'price_tags': "проанализируй картинку, это стеллаж с товарами, посмотри где не хватает ценников под товаром, помести туда ценник, исходя из соседних ценников",
         'random_angle': "поменяй случайно ракурс фотографии, учитывай что эту фотографию делает человек и ракурс не может быть слишком высоким или слишком низким, так же учитывай что товары и ценники должны быть хорошо видны",
@@ -254,9 +255,10 @@ def build_prompt(base_prompt: str, toggles: dict) -> str:
         return base_prompt.strip() if base_prompt else ""
     
     if not base_prompt or not base_prompt.strip():
-        return ", ".join(active_texts)
+        return ". ".join(active_texts)  # Объединяем через точку для лучшей читаемости
     
-    return f"{base_prompt.strip()}, {', '.join(active_texts)}"
+    # Объединяем базовый промпт с активными текстами
+    return f"{base_prompt.strip()}. {' '.join(active_texts)}"
 
 def process_uploaded_files(uploaded_files):
     """Обрабатывает загруженные файлы"""
@@ -351,7 +353,7 @@ def main():
         st.session_state.generation_started = False
     
     if 'stop_generation' not in st.session_state:
-        st.session_state.stop_generation = False  # Новый флаг для остановки
+        st.session_state.stop_generation = False
     
     # Загружаем результаты из сохраненного состояния
     if 'last_result_path' not in st.session_state:
@@ -405,6 +407,7 @@ def main():
         st.header("ℹ️ Информация")
         st.markdown(f"ID: `{st.session_state.customer_id}`")
         st.markdown(f"📎 {len(st.session_state.uploaded_images)}/10 изображений")
+        st.markdown("📐 Формат: 9:16 (вертикальный)")
         
         # Индикатор статуса генерации
         if st.session_state.processing:
@@ -479,18 +482,19 @@ def main():
             cols = st.columns(min(len(st.session_state.uploaded_images), 5))
             for i, img_data in enumerate(st.session_state.uploaded_images[:5]):
                 with cols[i]:
-                    st.image(img_data["thumbnail"], use_column_width=True)
-                    st.caption(f"{i+1}")
+                    if img_data["thumbnail"]:
+                        st.image(img_data["thumbnail"], use_column_width=True)
+                    st.caption(f"{i+1}. {img_data['name'][:10]}...")
     
     with col2:
         st.subheader("📝 Настройки")
         
         # Поле для промпта
         base_prompt = st.text_area(
-            "Описание:",
+            "Описание (необязательно):",
             value=st.session_state.current_prompt,
             height=80,
-            placeholder="Например: полка с продуктами...",
+            placeholder="Например: стеллаж с продуктами в магазине...",
             disabled=st.session_state.processing,
             key="base_prompt_input"
         )
@@ -505,35 +509,40 @@ def main():
         col_t1, col_t2 = st.columns(2)
         with col_t1:
             price_tags = st.toggle(
-                "🏷️ Ценники", 
+                "🏷️ Добавить ценники", 
                 value=st.session_state.toggle_states['price_tags'], 
                 key="t1", 
-                disabled=st.session_state.processing
+                disabled=st.session_state.processing,
+                help="Анализирует где не хватает ценников и добавляет их"
             )
             random_angle = st.toggle(
-                "🔄 Ракурс", 
+                "🔄 Случайный ракурс", 
                 value=st.session_state.toggle_states['random_angle'], 
                 key="t2", 
-                disabled=st.session_state.processing
+                disabled=st.session_state.processing,
+                help="Меняет ракурс фотографии (естественный, человеческий)"
             )
             messy_shelf = st.toggle(
-                "📦 Неопрятно", 
+                "📦 Неопрятная полка", 
                 value=st.session_state.toggle_states['messy_shelf'], 
                 key="t3", 
-                disabled=st.session_state.processing
+                disabled=st.session_state.processing,
+                help="Имитирует взаимодействие покупателей - часть товаров убрана"
             )
         with col_t2:
             professional = st.toggle(
-                "✨ Профессионально", 
+                "✨ Профессиональная выкладка", 
                 value=st.session_state.toggle_states['professional_arrangement'], 
                 key="t4", 
-                disabled=st.session_state.processing
+                disabled=st.session_state.processing,
+                help="Мерчендайзер выставил все товары и добавил ценники"
             )
             auto_fix = st.toggle(
-                "🔧 Авто", 
+                "🔧 Автоисправление", 
                 value=st.session_state.toggle_states['auto_fix'], 
                 key="t5", 
-                disabled=st.session_state.processing
+                disabled=st.session_state.processing,
+                help="Делает профессиональную выкладку товаров"
             )
         
         # Обновляем состояния тумблеров
@@ -552,10 +561,16 @@ def main():
         # Финальный промпт
         final_prompt = build_prompt(st.session_state.current_prompt, st.session_state.toggle_states)
         if final_prompt:
-            st.info(f"📝 {final_prompt[:100]}{'...' if len(final_prompt) > 100 else ''}")
+            with st.expander("📝 Финальный промпт", expanded=False):
+                st.write(final_prompt)
         
         # Кнопка генерации
-        can_generate = len(st.session_state.uploaded_images) > 0 and not st.session_state.processing and not st.session_state.generation_completed
+        has_images = len(st.session_state.uploaded_images) > 0
+        can_generate = has_images and not st.session_state.processing
+        
+        if not has_images:
+            st.warning("⚠️ Сначала загрузите изображения")
+        
         generate_button = st.button(
             "🚀 Сгенерировать",
             type="primary",
@@ -586,11 +601,12 @@ def main():
         status_placeholder = st.empty()
         
         # Обработка генерации
-        if generate_button and not st.session_state.processing and not st.session_state.generation_completed:
+        if generate_button and not st.session_state.processing:
             st.session_state.processing = True
             st.session_state.generation_started = True
             st.session_state.stop_generation = False
             st.session_state.task_id = None
+            st.session_state.generation_completed = False
             
             try:
                 references_urls = [img["url"] for img in st.session_state.uploaded_images if "url" in img]
@@ -617,7 +633,7 @@ def main():
                         status_placeholder.info(f"🆔 ID: {api_task_id}\n\n⏳ Ожидание...")
                         save_state_to_file()
                         
-                        # Получаем результат с проверкой на остановку
+                        # Получаем результат
                         task_result = None
                         for attempt in range(30):
                             if st.session_state.stop_generation:
