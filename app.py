@@ -12,7 +12,7 @@ import os
 from datetime import datetime
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.WARNING)  # Изменил на WARNING чтобы меньше логов
 logger = logging.getLogger(__name__)
 
 # Конфигурация API Yes Ai
@@ -47,7 +47,7 @@ def save_state_to_file():
         
         with open(STATE_FILE, 'w') as f:
             json.dump(state, f)
-        logger.info(f"Состояние сохранено в файл")
+        # Убрал лишнее логирование
     except Exception as e:
         logger.error(f"Ошибка при сохранении состояния: {e}")
 
@@ -60,10 +60,8 @@ def load_state_from_file():
             
             timestamp = datetime.fromisoformat(state.get('timestamp', '2000-01-01'))
             if (datetime.now() - timestamp).seconds < 3600:
-                logger.info(f"Состояние загружено из файла")
                 return state
             else:
-                logger.info(f"Состояние устарело, удаляем файл")
                 os.remove(STATE_FILE)
     except Exception as e:
         logger.error(f"Ошибка при загрузке состояния: {e}")
@@ -91,14 +89,12 @@ class FreeImageUploader:
                 'format': 'json'
             }
             
-            logger.info(f"Отправка изображения на Freeimage.host...")
             response = requests.post(self.api_url, data=data, timeout=60)
             
             if response.status_code == 200:
                 result = response.json()
                 if result.get('status_code') == 200 and result.get('success', {}).get('code') == 200:
                     image_url = result['image']['url']
-                    logger.info(f"Изображение успешно загружено: {image_url}")
                     return image_url
             return None
         except Exception as e:
@@ -168,7 +164,7 @@ class ImageGenerator:
             return {"error": str(e)}
     
     def get_task_result(self, task_id: str, max_attempts: int = 60, wait_time: int = 5) -> Optional[dict]:
-        """Получает результат задачи по task_id с увеличенным количеством попыток"""
+        """Получает результат задачи по task_id"""
         try:
             url = f"{API_URL_QUERY_IMAGE}{task_id}"
             
@@ -178,11 +174,9 @@ class ImageGenerator:
                 try:
                     response = requests.get(url, headers=self.headers, timeout=45)
                 except Exception as e:
-                    logger.warning(f"Попытка {attempt + 1}: ошибка запроса - {e}")
                     continue
                 
                 if response.status_code != 200:
-                    logger.warning(f"Попытка {attempt + 1}: статус {response.status_code}")
                     continue
                 
                 result = response.json()
@@ -191,9 +185,6 @@ class ImageGenerator:
                     data = result['results']['generation_data']
                     status = data.get('status')
                     result_url = data.get('result_url')
-                    status_description = data.get('status_description', '')
-                    
-                    logger.info(f"Попытка {attempt + 1}: статус={status}, описание={status_description}, result_url={result_url}")
                     
                     # Статусы API:
                     # 0 - в очереди
@@ -226,17 +217,14 @@ class ImageGenerator:
                     return {"status": "timeout", "error": "Превышено максимальное количество попыток", "completed": True}
                     
         except Exception as e:
-            logger.error(f"Ошибка при получении результата: {e}")
             return {"status": "error", "error": str(e), "completed": True}
     
     def download_and_save_image(self, image_url: str) -> Optional[str]:
         """Скачивает изображение по URL и сохраняет локально"""
         try:
-            logger.info(f"Скачивание изображения: {image_url}")
             response = requests.get(image_url, timeout=60)
             
             if response.status_code != 200:
-                logger.error(f"Ошибка скачивания: статус {response.status_code}")
                 return None
             
             # Определяем расширение по Content-Type
@@ -255,7 +243,6 @@ class ImageGenerator:
                 f.write(response.content)
             
             if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-                logger.info(f"Изображение сохранено: {filepath}")
                 return filepath
             return None
             
@@ -362,8 +349,12 @@ def main():
         layout="wide"
     )
     
-    # Загружаем сохраненное состояние
-    saved_state = load_state_from_file()
+    # Загружаем сохраненное состояние только один раз при запуске
+    if 'initialized' not in st.session_state:
+        saved_state = load_state_from_file()
+        st.session_state.initialized = True
+    else:
+        saved_state = None
     
     # Инициализация session state
     if 'generator' not in st.session_state:
@@ -381,16 +372,14 @@ def main():
     if 'stop_generation' not in st.session_state:
         st.session_state.stop_generation = False
     
-    # Загружаем результаты из сохраненного состояния
-    if 'last_result_path' not in st.session_state:
-        if saved_state and saved_state.get('last_result_path'):
-            if os.path.exists(saved_state['last_result_path']):
-                st.session_state.last_result_path = saved_state['last_result_path']
-                logger.info(f"Загружен результат из файла: {saved_state['last_result_path']}")
-            else:
-                st.session_state.last_result_path = None
+    # Загружаем результаты из сохраненного состояния (только если они еще не загружены)
+    if 'last_result_path' not in st.session_state and saved_state:
+        if saved_state.get('last_result_path') and os.path.exists(saved_state['last_result_path']):
+            st.session_state.last_result_path = saved_state['last_result_path']
         else:
             st.session_state.last_result_path = None
+    elif 'last_result_path' not in st.session_state:
+        st.session_state.last_result_path = None
     
     if 'last_result_url' not in st.session_state:
         st.session_state.last_result_url = saved_state.get('last_result_url') if saved_state else None
@@ -659,9 +648,10 @@ def main():
                         status_placeholder.info(f"🆔 ID: {api_task_id}\n\n⏳ Ожидание результата... (обычно 30-60 секунд)")
                         save_state_to_file()
                         
-                        # Получаем результат с увеличенным количеством попыток
+                        # Получаем результат
                         task_result = None
-                        max_attempts = 60  # Увеличили до 60 попыток
+                        max_attempts = 60
+                        status_text = status_placeholder.empty()
                         
                         for attempt in range(max_attempts):
                             if st.session_state.stop_generation:
@@ -670,8 +660,8 @@ def main():
                                 st.session_state.generation_started = False
                                 return
                             
-                            # Обновляем статус каждые 10 попыток
-                            if attempt % 10 == 0 and attempt > 0:
+                            # Обновляем статус
+                            if attempt % 6 == 0:  # Каждые 30 секунд
                                 status_placeholder.info(f"🆔 ID: {api_task_id}\n\n⏳ Ожидание... прошло {attempt*5} секунд")
                             
                             task_result = st.session_state.generator.get_task_result(api_task_id, max_attempts=1, wait_time=5)
@@ -686,7 +676,6 @@ def main():
                                 image_url = task_result.get("image_url")
                                 
                                 if image_url:
-                                    st.session_state.last_result_url = image_url
                                     status_placeholder.info("📥 Скачивание изображения...")
                                     save_state_to_file()
                                     
